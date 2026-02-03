@@ -1,10 +1,28 @@
 # main.py
 import os
 import sys
+
+# === 新增：抢占式初始化 ONNX ===
+try:
+    import onnxruntime as _ort
+    # 这一行不产生输出，但会强制 Windows 加载底层 DLL
+    _ort.get_device() 
+except Exception:
+    pass
+# ============================
+
 import subprocess
 import argparse
 from core.host_agent import HostAgent
 from win11toast import toast
+
+# =========================================================================
+# 修改说明：
+# 1. 移除了旧版直接打印 agent.chat 结果的逻辑。
+# 2. 重构了 run_cli 函数，使其能够消费 agent.chat 返回的生成器。
+# 3. 引入了实时终端输出逻辑 (sys.stdout.write)，支持流式显示内容。
+# 4. 增加了对 status, delta, tool, error 不同事件类型的分支处理。
+# =========================================================================
 
 def check_env():
     """环境自检"""
@@ -35,36 +53,72 @@ def run_gui():
         print("\nResonance Stopped.")
 
 def run_cli(query, session_id):
-    """CLI 执行模式"""
+    """
+    CLI 执行模式 (已重构以支持流式生成器)
+    """
     # 确保 session 目录存在
     os.makedirs("logs/sessions", exist_ok=True)
     
-    # 打印一些 Loading 状态
-    print(f"\n[Resonance]: Session='{session_id}'")
-    print(f"[Input]: {query}")
+    # 打印初始状态
+    print(f"\n[Resonance System]: Initializing Session='{session_id}'...")
+    print(f"[User]: {query}\n")
+    print("-" * 50)
     
-    # 初始化 Agent (这一步会读取 config/profiles 等)
+    # 初始化 Agent
     try:
         agent = HostAgent(session_id=session_id)
         
-        # 定义一个简单的回调打印到控制台
-        def cli_callback(text):
-            print(f"  > {text}")
+        full_response = ""
+        last_status = ""
+
+        # --- 修改点: 遍历生成器，处理流式事件 ---
+        for event in agent.chat(query):
+            etype = event["type"]
+            content = event.get("content", "")
+
+            if etype == "status":
+                # 状态更新：避免重复打印相同的状态
+                if content != last_status:
+                    # 使用颜色或特殊符号标识思考过程
+                    print(f"\n[*] {content}")
+                    last_status = content
             
-        # 执行交互
-        response = agent.chat(query, ui_callback=cli_callback)
-        
-        # 输出结果
-        print(f"\n[Result]: {response}\n")
-        
-        # Windows 通知 (可选)
-        try:
-            toast("Resonance", response[:100])
-        except:
-            pass
+            elif etype == "delta":
+                # 内容增量：实时流式输出到终端
+                sys.stdout.write(content)
+                sys.stdout.flush()
+                full_response += content
             
+            elif etype == "tool":
+                # 工具调用结果：换行显示并使用代码块风格
+                print(f"\n\n[🛠️ Tool Output - {event.get('name')}]:")
+                # 稍微缩进显示工具返回的内容
+                indented_content = "\n".join(["    " + line for line in str(content).splitlines()])
+                print(indented_content)
+                print("-" * 30)
+                # 工具执行完后重置状态提示，以便接下来的文字输出能正常换行
+                last_status = ""
+            
+            elif etype == "error":
+                # 错误处理
+                print(f"\n\n[❌ Error]: {content}")
+
+        # 交互结束后的收尾
+        print("\n" + "-" * 50)
+        print(f"\n[Final Response Generated.]\n")
+        
+        # Windows 通知 (使用聚合后的完整文本)
+        if full_response:
+            try:
+                # 截取前100个字符用于通知预览
+                toast("Resonance Task Completed", full_response[:100] + "...")
+            except:
+                pass
+                
     except Exception as e:
-        print(f"[Fatal Error]: {e}")
+        import traceback
+        print(f"\n[Fatal Error]: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Resonance AI Host")

@@ -182,12 +182,9 @@ Core Principles:
         避免将垃圾对话（"你好", "嗯"）存入。
         """
         try:
-            # 1. 启发式过滤 (Heuristic Filter)
-            # 如果内容太短，通常不具备长期记忆价值
-            if len(user_input) < 5 and len(ai_output) < 10:
-                return
 
-            # 2. 调用 LLM 进行信息萃取 (Extraction)
+
+            # 调用 LLM 进行信息萃取 (Extraction)
             # 使用更便宜的模型或相同的模型，Prompt 侧重于"事实提取"
             extraction_prompt = f"""
 You are a Memory Extractor. Analyze the following interaction Turn (User input, AI thoughts, and Tool outputs).
@@ -264,7 +261,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             # 4. 进入 ReAct 循环
             # 用于萃取的全量日志记录（本轮对话）
             turn_log_for_extraction = f"User Input: {user_input}\n"
-            max_iterations = 8  # 防止模型陷入死循环
+            max_iterations = 24  # 防止模型陷入死循环
             current_iteration = 0
             final_full_content = ""
 
@@ -353,7 +350,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     yield {"type": "status", "content": f"Executing tool: {func_name}..."}
                     
                     # 执行并获取结果
-                    tool_result = self._route_tool_execution(func_name, args, None)
+                    tool_result = self._route_tool_execution(func_name, args)
                     
                     # 关键可视化：发送工具结果
                     yield {"type": "tool", "name": func_name, "content": tool_result}
@@ -386,7 +383,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             import traceback
             yield {"type": "error", "content": str(traceback.format_exc())}
 
-    def _route_tool_execution(self, function_name, args, ui_callback):
+    def _route_tool_execution(self, function_name, args):
         """路由工具调用到 Toolbox，保持代码整洁"""
         try:
             if function_name in ["invoke_skill", "run_registered_script"]:

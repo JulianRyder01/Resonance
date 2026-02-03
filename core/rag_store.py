@@ -1,33 +1,55 @@
 # core/rag_store.py
 import os
-import chromadb
-from chromadb.config import Settings
 import uuid
 import datetime
+import sys
 
 class RAGStore:
     """
-    负责长期记忆的向量存储与检索 (Retrieval-Augmented Generation)
-    使用 ChromaDB 本地存储。
+    负责长期记忆的向量存储与检索。
+    重构：显式管理嵌入模型，防止 ChromaDB 内部误报。
     """
     def __init__(self, persistence_path="./logs/vector_store", collection_name="resonance_memory"):
         self.persistence_path = persistence_path
         self.collection_name = collection_name
+        self.is_available = False
+        self.embedding_function = None
         
         # 确保目录存在
         os.makedirs(self.persistence_path, exist_ok=True)
         
         # 初始化 ChromaDB Client
         try:
+            # 1. 强制在最前面加载，确保它在当前进程中是活的
+            import onnxruntime
+            import chromadb
+            from chromadb.utils import embedding_functions
+            
+            # 2. 显式创建嵌入函数
+            # 我们直接使用用户测试通过的逻辑
+            self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
+            
+            # 3. 立即进行一次“冷启动”测试，确保它真的能跑
+            # 如果这里不报错，说明这一轮初始化是铁证如山的成功
+            self.embedding_function(["warmup"])
+
+            # 4. 初始化客户端
             self.client = chromadb.PersistentClient(path=self.persistence_path)
             
-            # 获取或创建集合
-            # 使用默认的 embedding model (all-MiniLM-L6-v2)
-            self.collection = self.client.get_or_create_collection(name=self.collection_name)
-            print(f"[System]: Vector Database loaded from {self.persistence_path}")
+            # 5. 获取集合时，显式传入我们已经验证成功的 embedding_function
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_function
+            )
+            
+            self.is_available = True
+            print(f"[System]: Vector Database (RAG) is Available.")
+            
         except Exception as e:
-            print(f"[Error]: Failed to initialize Vector Store: {e}")
+            self.is_available = False
             self.collection = None
+            # 只有在初次启动失败时静默，不干扰 UI
+            print(f"[RAG Init Debug]: {str(e)}")
 
     def add_memory(self, text, metadata=None):
         """

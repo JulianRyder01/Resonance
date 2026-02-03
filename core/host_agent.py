@@ -176,7 +176,7 @@ Core Principles:
     # =========================================================================
     # [新增核心逻辑] 异步记忆萃取与存储
     # =========================================================================
-    def _extract_and_save_memory_async(self, user_input, ai_output):
+    def _extract_and_save_memory_async(self, turn_events_log):
         """
         后台线程任务：分析对话，萃取有价值的信息存入向量库。
         避免将垃圾对话（"你好", "嗯"）存入。
@@ -190,26 +190,26 @@ Core Principles:
             # 2. 调用 LLM 进行信息萃取 (Extraction)
             # 使用更便宜的模型或相同的模型，Prompt 侧重于"事实提取"
             extraction_prompt = f"""
-Analyze the following interaction for Long-term Memory storage.
-Extract meaningful facts, user preferences, specific project details, or technical solutions.
-Ignore casual chitchat (greetings, thanks) or temporary command outputs.
+You are a Memory Extractor. Analyze the following interaction Turn (User input, AI thoughts, and Tool outputs).
+Your goal is to extract NEW, PERMANENT facts about the user, their projects, or technical solutions found.
 
-Interaction:
-User: {user_input}
-AI: {ai_output}
+[Interaction Turn Log]:
+{turn_events_log}
 
-Instructions:
-- If the interaction contains useful facts worth remembering for future sessions, extract them into a concise statement.
-- If the interaction is trivial or purely operational (e.g. "list files"), output "NO_INFO".
-- Do not output "User said...", just the fact.
+[Instructions]:
+1. Focus on: Project paths, User preferences, recurring technical issues/solutions, specific facts.
+2. Ignore: Transient states (e.g., current CPU usage), casual greetings, or "OK" messages.
+3. If no permanent fact is found, output "NO_INFO".
+4. If facts are found, output them as concise, independent statements.
+5. Example Output: "The user's project 'Resonance' is located at D:\\Develop\\Resonance."
 
-Output:
+[Output]:
 """
             response = self.client.chat.completions.create(
                 model=self.current_model_config['model'],
                 messages=[{"role": "user", "content": extraction_prompt}],
-                temperature=0.1, # 低温度确保准确
-                max_tokens=150
+                temperature=0.1,
+                max_tokens=256
             )
             
             extracted_info = response.choices[0].message.content.strip()
@@ -222,7 +222,7 @@ Output:
                     metadata={
                         "type": "conversation_insight",
                         "session": self.session_id,
-                        "original_user_input": user_input[:50] # 方便追溯
+                        "original_user_input": turn_events_log[:50] # 方便追溯
                     }
                 )
                 if success:
@@ -237,9 +237,10 @@ Output:
     # =========================================================================
     # [核心修改点] 正确实现的 ReAct 交互逻辑 (多工具支持 & 循环推理)
     # =========================================================================
-    def chat(self, user_input, ui_callback=None):
+    def chat(self, user_input):
         """
-        主交互逻辑：遵循 OpenAI 工具调用协议，支持多步思考。
+        主交互逻辑 (Generator):
+        Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
         """
         try:
             # 1. 初始化上下文
@@ -261,80 +262,113 @@ Output:
             self.memory.add_user_message(user_input)
 
             # 4. 进入 ReAct 循环
+            # 用于萃取的全量日志记录（本轮对话）
+            turn_log_for_extraction = f"User Input: {user_input}\n"
             max_iterations = 8  # 防止模型陷入死循环
             current_iteration = 0
-            final_reply = ""
+            final_full_content = ""
 
             while current_iteration < max_iterations:
                 current_iteration += 1
-                
-                if ui_callback:
-                    ui_callback(f"🧠 Thinking (Step {current_iteration})...")
+                yield {"type": "status", "content": f"Thinking (Step {current_iteration})..."}
 
-                # LLM 推理
+                # 调用 OpenAI Stream
                 response = self.client.chat.completions.create(
                     model=self.current_model_config['model'],
                     messages=messages,
                     tools=tools,
                     tool_choice="auto",
-                    temperature=self.current_model_config['temperature']
+                    temperature=self.current_model_config['temperature'],
+                    stream=True  # [关键点] 开启流式
                 )
 
-                response_message_obj = response.choices[0].message
-                
-                # [修改点] 将 OpenAI 的 Message 对象转换为 dict，防止后期属性访问报错
-                # model_dump 是 Pydantic v2 (openai v1+) 的标准写法
-                response_dict = response_message_obj.model_dump(exclude_none=True)
-                
-                # 将该消息加入本轮对话工作上下文
-                messages.append(response_dict)
-                
-                # 同步记录到持久化 Memory
-                if response_message_obj.tool_calls:
-                    self.memory.add_ai_tool_call(response_message_obj.content, response_message_obj.tool_calls)
-                else:
-                    self.memory.add_ai_message(response_message_obj.content)
+                full_response_content = ""
+                tool_calls_buffer = {} # 用于收集流式的 tool_calls
 
-                # B. 检查是否有工具调用
-                if not response_message_obj.tool_calls:
-                    final_reply = response_message_obj.content
+                for chunk in response:
+                    delta = chunk.choices[0].delta
+                    
+                    # A. 处理文本流
+                    if delta.content:
+                        full_response_content += delta.content
+                        yield {"type": "delta", "content": delta.content}
+                    
+                    # B. 处理工具调用流
+                    if delta.tool_calls:
+                        for tc_chunk in delta.tool_calls:
+                            idx = tc_chunk.index
+                            if idx not in tool_calls_buffer:
+                                tool_calls_buffer[idx] = {
+                                    "id": tc_chunk.id,
+                                    "name": tc_chunk.function.name,
+                                    "arguments": ""
+                                }
+                            if tc_chunk.function.arguments:
+                                tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
+
+                # 记录 AI 的思考文字
+                if full_response_content:
+                    turn_log_for_extraction += f"AI Thought: {full_response_content}\n"
+
+                active_tool_calls = []
+                for _, tc_data in tool_calls_buffer.items():
+                    # 模拟 OpenAI 的对象结构供逻辑复用
+                    class Func:
+                        def __init__(self, n, a): self.name, self.arguments = n, a
+                    class TC:
+                        def __init__(self, i, f): self.id, self.function = i, f
+                    active_tool_calls.append(TC(tc_data["id"], Func(tc_data["name"], tc_data["arguments"])))
+
+                # 记录到内存 (模拟原有非流式逻辑的保存)
+                if active_tool_calls:
+                    self.memory.add_ai_tool_call(full_response_content, active_tool_calls)
+                    # 将这一轮的响应加入上下文
+                    messages.append({
+                        "role": "assistant",
+                        "content": full_response_content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                            } for tc in active_tool_calls
+                        ]
+                    })
+                else:
+                    self.memory.add_ai_message(full_response_content)
+                    messages.append({"role": "assistant", "content": full_response_content})
+                    final_full_content = full_response_content
+
+                # C. 执行工具（如果有）
+                if not active_tool_calls:
                     break
                 
-                # C. 执行工具调用
-                tool_calls = response_message_obj.tool_calls
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
+                for tc in active_tool_calls:
+                    func_name = tc.function.name
                     try:
-                        args = json.loads(tool_call.function.arguments)
+                        args = json.loads(tc.function.arguments)
                     except:
                         args = {}
                     
-                    # 回调 UI
-                    if ui_callback:
-                        ui_callback(f"⚙️ Executing {function_name}...")
+                    yield {"type": "status", "content": f"Executing tool: {func_name}..."}
                     
-                    # 调用 Toolbox (逻辑保持不变，但增加一个 update_memory 的特殊处理)
-                    tool_result = self._route_tool_execution(function_name, args, ui_callback)
+                    # 执行并获取结果
+                    tool_result = self._route_tool_execution(func_name, args, None)
                     
-                    # 记录结果
-                    self.memory.add_tool_message(tool_result, tool_call.id)
+                    # 关键可视化：发送工具结果
+                    yield {"type": "tool", "name": func_name, "content": tool_result}
                     
-                    # 将工具结果加入当前对话上下文 (role="tool")
+                    # 持久化记录
+                    # 将工具结果也存入萃取日志
+                    turn_log_for_extraction += f"Tool Output ({func_name}): {str(tool_result)[:1000]}\n" # 截断过长的输出以节省Token
+                    
+                    self.memory.add_tool_message(tool_result, tc.id)
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": function_name,
+                        "tool_call_id": tc.id,
+                        "name": func_name,
                         "content": str(tool_result)
                     })
-
-                # 完成本轮所有工具执行，继续 while 循环让模型根据 tool 结果进行下一轮思考
-
-            # 5. 后置处理逻辑
-            # [修改点] 使用 .get('role') 访问字典，确保安全
-            if not final_reply and len(messages) > 0:
-                last_msg = messages[-1]
-                if isinstance(last_msg, dict) and last_msg.get('role') == "assistant":
-                    final_reply = last_msg.get('content', "")
 
             self._update_summary_if_needed()
             
@@ -342,22 +376,20 @@ Output:
             # 使用守护线程 (daemon=True)，主程序退出时它自动结束，不会卡死进程
             memory_thread = threading.Thread(
                 target=self._extract_and_save_memory_async,
-                args=(user_input, final_reply),
+                args=(turn_log_for_extraction,),
                 daemon=True
             )
             memory_thread.start()
 
-            return final_reply if final_reply else "Task completed (No textual response)."
 
         except Exception as e:
             import traceback
-            print(traceback.format_exc())
-            return f"Resonance Core Error: {str(e)}"
+            yield {"type": "error", "content": str(traceback.format_exc())}
 
     def _route_tool_execution(self, function_name, args, ui_callback):
         """路由工具调用到 Toolbox，保持代码整洁"""
         try:
-            if function_name == "invoke_skill" or function_name == "run_registered_script":
+            if function_name in ["invoke_skill", "run_registered_script"]:
                 alias = args.get("skill_alias") or args.get("script_alias")
                 extra = args.get("args", "")
                 return self.toolbox.invoke_registered_skill(alias, extra)
@@ -369,19 +401,15 @@ Output:
                 return self.toolbox.add_new_script(args.get("alias"), args.get("command"), args.get("description"))
                 
             elif function_name == "scan_directory_projects":
-                res = self.toolbox.scan_and_remember(args.get("path"))
-                self.rag_store.add_memory(res, {"type": "fact_project"})
-                return res
+                # 这里只负责返回扫描结果字符串
+                return self.toolbox.scan_and_remember(args.get("path"))
                 
             elif function_name == "read_file_content":
                 return self.toolbox.read_file_content(args.get("file_path"))
                 
             elif function_name == "remember_user_fact":
-                key = args.get("key")
-                val = args.get("value")
-                res = self.toolbox.remember_user_fact(key, val)
-                self.rag_store.add_memory(f"User Fact: {key} is {val}", {"type": "explicit_fact"})
-                return res
+                # 只负责更新 UserProfile 文件
+                return self.toolbox.remember_user_fact(args.get("key"), args.get("value"))
                 
             elif function_name == "list_directory_files":
                 return self.toolbox.list_directory_files(

@@ -5,3 +5,4 @@ directory_listing_with_content.txt
 config/config.yaml
 config/profiles.yaml
 config/user_profile.yaml
+__pycache__

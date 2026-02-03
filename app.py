@@ -27,6 +27,8 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #1e212b; border-radius: 4px; color: #fff; }
     .stTabs [aria-selected="true"] { background-color: #4facfe; color: white; }
+    /* 过程日志美化 */
+    .thought-container { border-left: 2px solid #4facfe; padding-left: 10px; margin: 5px 0; color: #888; font-style: italic; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,6 +113,14 @@ if nav == "💬 Chat Console":
                     st.write(content)
             elif role == "assistant":
                 with st.chat_message("assistant", avatar="💠"):
+                    if msg.get("content"):
+                        st.markdown(msg["content"])
+                    if msg.get("tool_calls"):
+                        for tc in msg["tool_calls"]:
+                            st.caption(f"🔧 Called: {tc['function']['name']}")
+            elif role == "tool":
+                with st.expander(f"🛠️ Tool Result: {msg.get('name', 'Output')}"):
+                    st.code(msg["content"], language="powershell")
                     st.markdown(content)
 
     # 输入框
@@ -120,22 +130,39 @@ if nav == "💬 Chat Console":
             with st.chat_message("user", avatar="👤"):
                 st.write(prompt)
         
-        with chat_container:
-            with st.chat_message("assistant", avatar="💠"):
-                status = st.empty()
-                status.markdown("Thinking...")
+        # 2. 机器人响应容器
+        with st.chat_message("assistant", avatar="💠"):
+            # 创建一个“思考中”状态
+            status_container = st.status("Initializing...", expanded=True)
+            # 文本瀑布流容器
+            response_placeholder = st.empty()
+            full_response = ""
+            
+            # 遍历生成器
+            for event in st.session_state.agent.chat(prompt):
+                etype = event["type"]
+                content = event.get("content", "")
+
+                if etype == "status":
+                    status_container.update(label=content)
                 
-                def ui_callback(txt):
-                    status.info(txt)
+                elif etype == "delta":
+                    full_response += content
+                    # 实时渲染文字瀑布流
+                    response_placeholder.markdown(full_response + "▌")
                 
-                # 调用 Agent
-                response = st.session_state.agent.chat(prompt, ui_callback=ui_callback)
+                elif etype == "tool":
+                    # 在思考过程中展示工具产出
+                    with status_container:
+                        st.write(f"✅ **Tool [{event['name']}] output:**")
+                        st.code(content, language="powershell")
                 
-                status.empty()
-                st.markdown(response)
-        
-        # 刷新以确保工具调用的 log 也能正确渲染出来
-        # st.rerun() 
+                elif etype == "error":
+                    st.error(f"Error: {content}")
+            
+            # 最终渲染（移除光标符号）
+            response_placeholder.markdown(full_response)
+            status_container.update(label="Task Completed", state="complete", expanded=False)
 
 # ================= 页面：配置管理 (0代码) =================
 elif nav == "⚙️ System Config":

@@ -1,0 +1,7 @@
+logs
+DirLister.py
+directory_listing_with_content.txt
+.vscode
+config/config.yaml
+config/profiles.yaml
+config/user_profile.yaml

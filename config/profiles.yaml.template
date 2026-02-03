@@ -1,0 +1,9 @@
+profiles:
+  default_profile:
+    api_key: sk-YOUR_KEY_HERE
+    base_url: https://api.openai.com/v1
+    model: ''
+    name: xx
+    provider: openai
+    temperature: 0.7  
+

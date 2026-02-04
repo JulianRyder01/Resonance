@@ -6,3 +6,4 @@ watchdog>=3.0.0
 pandas
 win11toast
 chromadb>=0.4.0
+plotly

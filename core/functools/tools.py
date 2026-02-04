@@ -1,6 +1,7 @@
 # core/functools/tools.py
 # [新增文件] 将工具逻辑与定义从 HostAgent 解耦
 import os
+import sys
 import subprocess
 import time
 import json
@@ -51,7 +52,7 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "execute_shell_command",
-                    "description": "Execute a raw Windows PowerShell command for general tasks.",
+                    "description": "Execute a raw Windows PowerShell command. Use this for general tasks, installing pip packages, or running python scripts.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -190,7 +191,7 @@ class Toolbox:
     def execute_shell(self, command, cwd=None, timeout=120):
         """执行 PowerShell 命令"""
         try:
-            # 强制使用 UTF-8 编码解码，防止中文乱码
+            # 环境准备：强制使用 UTF-8，防止中文乱码
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
             
@@ -435,15 +436,9 @@ class Toolbox:
                 self.agent.user_data['known_projects'].update(found_items)
                 
             # 保存到文件
+            import yaml
             with open(self.agent.user_profile_path, 'w', encoding='utf-8') as f:
-                json.dump(self.agent.user_data, f, ensure_ascii=False, indent=2) # 兼容 yaml 加载，但这里保持原逻辑写入yaml更好，这里为了Tools解耦，需要Agent提供保存接口，或者直接操作文件。
-                # 修正：HostAgent 用的是 yaml，这里为了稳健，直接复用 Agent 的逻辑会更好。
-                # 由于这是 Tool，直接操作文件可能不一致。
-                # 更好的方式是修改 self.agent.user_data 后调用 agent.load_all_configs 刷新，但持久化需要写入。
-                # 重新调用 yaml dump
-                import yaml
-                with open(self.agent.user_profile_path, 'w', encoding='utf-8') as f:
-                    yaml.dump(self.agent.user_data, f, allow_unicode=True)
+                yaml.dump(self.agent.user_data, f, allow_unicode=True)
             
             # 刷新 Agent 内存
             self.agent.load_all_configs()

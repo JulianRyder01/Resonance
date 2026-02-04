@@ -8,6 +8,8 @@ import uuid
 from core.host_agent import HostAgent
 from core.memory import ConversationMemory
 from utils.monitor import SystemMonitor
+import plotly.express as px
+import plotly.graph_objects as go
 
 # --- 页面配置 ---
 st.set_page_config(
@@ -57,7 +59,7 @@ with st.sidebar:
     st.caption(f"Ver: {st.session_state.agent.config['system']['version']}")
     
     # 导航 [修改点] Scripts & Models -> Skills & Models
-    nav = st.radio("Navigation", ["💬 Chat Console", "⚙️ System Config", "🧩 Skills & Models", "📊 Monitor"], label_visibility="collapsed")
+    nav = st.radio("Navigation", ["💬 聊天 Chat Console", "⚙️ 系统配置 System Config", "🧩 技能、记忆与模型提供商 Skills & Models", "🧠 记忆可视化 Memory Cortex", "📊 电脑状态监控 Monitor"], label_visibility="collapsed")
     
     st.divider()
     
@@ -87,7 +89,7 @@ with st.sidebar:
     st.info(f"🤖 Active Model: **{active_profile}**")
 
 # ================= 页面：聊天控制台 =================
-if nav == "💬 Chat Console":
+if nav == "💬 聊天 Chat Console":
     st.header(f"Chat: {st.session_state.session_id}")
     
     # 聊天记录显示区
@@ -165,7 +167,7 @@ if nav == "💬 Chat Console":
             status_container.update(label="Task Completed", state="complete", expanded=False)
 
 # ================= 页面：配置管理 (0代码) =================
-elif nav == "⚙️ System Config":
+elif nav == "⚙️ 系统配置 System Config":
     st.header("⚙️ General Settings")
     
     current_conf = st.session_state.agent.config
@@ -198,8 +200,7 @@ elif nav == "⚙️ System Config":
             st.toast("User Profile Updated!", icon="🧠")
 
 # ================= 页面：模型与技能 (0代码核心) =================
-# [修改点] 名称更新
-elif nav == "🧩 Skills & Models":
+elif nav == "🧩 技能、记忆与模型提供商 Skills & Models":
     st.header("🧩 Extensions Manager")
     
     tab_m, tab_s = st.tabs(["🤖 LLM Profiles", "⚡ Skills Library"])
@@ -315,9 +316,129 @@ elif nav == "🧩 Skills & Models":
             full_conf['scripts'] = new_scripts
             st.session_state.agent.update_config(new_config=full_conf)
             st.toast("Skills updated! Agent can now use them.", icon="✅")
+# ================= 页面：记忆皮层 (Memory Cortex) =================
+elif nav == "🧠 记忆可视化 Memory Cortex":
+    st.header("🧠 Memory Cortex (RAG Visualization)")
+    
+    # 1. 获取数据
+    df = st.session_state.agent.rag_store.get_all_memories_as_df()
+    
+    if df.empty:
+        st.warning("No memories found in the Vector Database yet. Start chatting to build memories!")
+    else:
+        # --- 顶部 KPI ---
+        total_mem = len(df)
+        total_access = df['access_count'].sum() if 'access_count' in df.columns else 0
+        most_active_type = df.groupby('type')['access_count'].sum().idxmax() if not df.empty else "None"
+        last_activity = df['last_accessed'].max().strftime('%Y-%m-%d %H:%M') if 'last_accessed' in df.columns else "N/A"
 
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Memories", total_mem, help="Number of vectors stored")
+        k2.metric("Total Retrievals", int(total_access), help="How many times memories were successfully recalled")
+        k3.metric("Dominant Context", most_active_type, help="Most accessed memory category")
+        k4.metric("Last Activity", last_activity)
+        
+        st.divider()
+        
+        # --- 图表区 ---
+        col_charts_1, col_charts_2 = st.columns([1, 1])
+        
+        with col_charts_1:
+            st.subheader("Memory Composition")
+            # 旭日图：展示记忆类型分布，大小由“被访问次数”或“数量”决定
+            if 'type' in df.columns:
+                # 填充空类型
+                df['type'] = df['type'].fillna('unknown')
+                fig_sun = px.sunburst(
+                    df, 
+                    path=['type', 'content'], # 层级：先看类型，再看具体内容(截断)
+                    values='access_count' if total_access > 0 else None,
+                    title="Memory Activation Map (Size = Retrieval Count)",
+                    color='type',
+                    height=400
+                )
+                # 只显示 content 的前20个字，避免图表太乱
+                fig_sun.update_traces(textinfo="label+percent entry")
+                st.plotly_chart(fig_sun, use_container_width=True)
+
+        with col_charts_2:
+            st.subheader("Memory Timeline & Value")
+            # 散点图：X轴=创建时间，Y轴=访问次数，颜色=类型，大小=访问次数
+            if 'timestamp' in df.columns and 'access_count' in df.columns:
+                fig_scat = px.scatter(
+                    df,
+                    x='timestamp',
+                    y='access_count',
+                    color='type',
+                    size='access_count',
+                    hover_data=['content'],
+                    title="Memory Evolution (Time vs. Utility)",
+                    height=400
+                )
+                st.plotly_chart(fig_scat, use_container_width=True)
+        
+        st.divider()
+
+        # --- RAG 实验室 (Debugger) ---
+        st.subheader("🧪 RAG Laboratory")
+        st.info("Test your retrieval effectiveness here. See what the Agent 'remembers' for a given query.")
+        
+        test_query = st.text_input("Enter a test query (e.g., 'Who am I?', 'project path')", "")
+        
+        if test_query:
+            # 直接调用 Chroma 底层查询以获取距离
+            col_res1, col_res2 = st.columns([1, 1])
+            with col_res1:
+                st.markdown("#### 🔍 Retrieval Results")
+                # 我们手动调底层 collection query 来拿 distance，因为 rag_store.search_memory 封装掉了
+                collection = st.session_state.agent.rag_store.collection
+                if collection:
+                    results = collection.query(
+                        query_texts=[test_query],
+                        n_results=5,
+                        include=['documents', 'metadatas', 'distances']
+                    )
+                    
+                    if results['ids']:
+                        for i in range(len(results['ids'][0])):
+                            doc = results['documents'][0][i]
+                            meta = results['metadatas'][0][i]
+                            dist = results['distances'][0][i]
+                            
+                            # 卡片展示
+                            with st.container():
+                                st.markdown(f"""
+                                **Memory #{i+1}** (Distance: `{dist:.4f}`)  
+                                📂 Type: `{meta.get('type', 'N/A')}` | 🔥 Retrieves: `{meta.get('access_count', 0)}`
+                                """)
+                                st.code(doc, language="text")
+                                st.divider()
+                    else:
+                        st.caption("No matches found.")
+            
+            with col_res2:
+                st.markdown("#### 📊 Metric Analysis")
+                st.caption("""
+                - **Distance**: 越小越好 (Cosine Distance). 通常 < 1.0 表示相关.
+                - **Retrieves**: 该记忆被系统自动调用的次数. 次数高说明它是核心记忆.
+                """)
+                # 这里可以加个 Gauge 图或者简单的分析建议
+        
+        st.divider()
+
+        # --- 数据矩阵 ---
+        st.subheader("💾 The Vault (Raw Data)")
+        st.dataframe(
+            df[['type', 'content', 'access_count', 'timestamp', 'last_accessed', 'id']], 
+            use_container_width=True,
+            column_config={
+                "content": st.column_config.TextColumn("Content", width="large"),
+                "access_count": st.column_config.ProgressColumn("Usage", format="%d", min_value=0, max_value=int(df['access_count'].max()) if not df.empty else 100),
+                "timestamp": st.column_config.DatetimeColumn("Created", format="D MMM YYYY, HH:mm"),
+            }
+        )
 # ================= 页面：监控 =================
-elif nav == "📊 Monitor":
+elif nav == "📊 电脑状态监控 Monitor":
     st.header("🖥️ System Monitor")
     metrics = SystemMonitor.get_system_metrics()
     

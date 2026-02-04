@@ -6,7 +6,9 @@ config/config.yaml
 config/profiles.yaml
 config/user_profile.yaml
 __pycache__/
+core/__pycache__
 .pyc
 .backup
 config/config.yaml.backup
 
+core/functools/__pycache__/tools.cpython-311.pyc

@@ -3,11 +3,12 @@ import os
 import uuid
 import datetime
 import sys
+import pandas as pd
 
 class RAGStore:
     """
     负责长期记忆的向量存储与检索。
-    重构：显式管理嵌入模型，防止 ChromaDB 内部误报。
+    [升级版]：支持访问统计（Access Counting）和全量导出，带鲁棒性修复。
     """
     def __init__(self, persistence_path="./logs/vector_store", collection_name="resonance_memory"):
         self.persistence_path = persistence_path
@@ -65,7 +66,11 @@ class RAGStore:
         
         # 自动注入时间戳
         metadata['timestamp'] = datetime.datetime.now().isoformat()
-        metadata['type'] = metadata.get('type', 'general')
+        metadata['type'] = metadata.get('type', 'general') # 类型：general, user_fact, project, insight
+        
+        # [新增] 统计字段初始化
+        metadata['access_count'] = 0
+        metadata['last_accessed'] = metadata['timestamp']
 
         try:
             self.collection.add(
@@ -80,7 +85,7 @@ class RAGStore:
 
     def search_memory(self, query_text, n_results=3):
         """
-        语义检索相关记忆
+        语义检索相关记忆 + [自动更新访问统计]
         :param query_text: 用户的问题
         :param n_results: 返回几条结果
         :return: list of strings (记忆内容)
@@ -94,13 +99,109 @@ class RAGStore:
                 n_results=n_results
             )
             
-            # results['documents'] 是一个 list of list
-            if results and results['documents']:
-                return results['documents'][0]
+            # results 结构: {'ids': [['id1', 'id2']], 'documents': [['text1', 'text2']], 'metadatas': [[{...}, {...}]]}
+            
+            if results and results['ids'] and results['ids'][0]:
+                hit_ids = results['ids'][0]
+                hit_docs = results['documents'][0]
+                
+                # [新增] 异步/同步更新统计数据 (Access Counter)
+                # 为了不拖慢检索速度，这里简单直接更新，生产环境可放入线程
+                self._increment_stats(hit_ids, results['metadatas'][0])
+                
+                return hit_docs
             return []
         except Exception as e:
             print(f"[Error]: Memory search failed: {e}")
             return []
+
+    def _increment_stats(self, ids, current_metadatas):
+        """[内部方法] 更新被检索记忆的计数器"""
+        try:
+            new_metadatas = []
+            for meta in current_metadatas:
+                # 复制原有 metadata 防止引用问题
+                new_meta = meta.copy()
+                # 计数 +1
+                current_count = int(new_meta.get('access_count', 0))
+                new_meta['access_count'] = current_count + 1
+                new_meta['last_accessed'] = datetime.datetime.now().isoformat()
+                new_metadatas.append(new_meta)
+            
+            # ChromaDB update 需要传入 ids 和新的 metadatas
+            self.collection.update(
+                ids=ids,
+                metadatas=new_metadatas
+            )
+        except Exception as e:
+            # 统计更新失败不应阻碍主流程，静默失败即可
+            # print(f"[Warning] Failed to update memory stats: {e}")
+            pass
+
+    def get_all_memories_as_df(self):
+        """[新增] 导出所有记忆为 Pandas DataFrame，用于可视化分析"""
+        if not self.collection:
+            return pd.DataFrame()
+            
+        try:
+            # 获取所有数据
+            all_data = self.collection.get(include=['metadatas', 'documents', 'embeddings'])
+            
+            records = []
+            ids = all_data['ids']
+            docs = all_data['documents']
+            metas = all_data['metadatas']
+            
+            for i, uid in enumerate(ids):
+                # 如果 meta 是 None (极端情况)，给个空字典
+                row = metas[i].copy() if metas[i] else {}
+                row['id'] = uid
+                row['content'] = docs[i]
+                # 确保数值列存在
+                if 'access_count' not in row: row['access_count'] = 0
+                records.append(row)
+                
+            df = pd.DataFrame(records)
+            
+            if df.empty:
+                return pd.DataFrame(columns=['type', 'content', 'access_count', 'timestamp', 'last_accessed', 'id'])
+
+            # --- [核心修复] Schema 补全逻辑 ---
+            # 确保 UI 需要的所有列都存在，如果不存在则填充默认值
+            
+            # 1. access_count 默认为 0
+            if 'access_count' not in df.columns:
+                df['access_count'] = 0
+            else:
+                df['access_count'] = df['access_count'].fillna(0).astype(int)
+                
+            # 2. timestamp 默认为当前时间 (如果旧数据真的没有)
+            if 'timestamp' not in df.columns:
+                df['timestamp'] = datetime.datetime.now().isoformat()
+            
+            # 3. last_accessed 默认为 timestamp
+            if 'last_accessed' not in df.columns:
+                df['last_accessed'] = df['timestamp']
+            
+            # 4. type 默认为 unknown
+            if 'type' not in df.columns:
+                df['type'] = 'unknown'
+            else:
+                df['type'] = df['type'].fillna('unknown')
+
+            # --- 类型转换 ---
+            # 将字符串时间转为 datetime 对象，以便绘图
+            for col in ['timestamp', 'last_accessed']:
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                except:
+                    pass
+                
+            return df
+        except Exception as e:
+            print(f"Error exporting dataframe: {e}")
+            # 发生错误时返回空但结构正确的 DataFrame，防止 UI 报错
+            return pd.DataFrame(columns=['type', 'content', 'access_count', 'timestamp', 'last_accessed', 'id'])
 
     def count(self):
         if self.collection:

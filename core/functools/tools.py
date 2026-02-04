@@ -7,6 +7,8 @@ import time
 import json
 import glob
 from openai import OpenAI
+# [修改点] 引入 WebEngine
+from core.functools.web_engine import WebEngine
 
 class Toolbox:
     def __init__(self, agent):
@@ -15,6 +17,8 @@ class Toolbox:
         :param agent: HostAgent 实例，用于访问 config, profiles, memory 等
         """
         self.agent = agent
+        # [修改点] 初始化联网引擎
+        self.web_engine = WebEngine()
 
     def get_tool_definitions(self):
         """
@@ -25,6 +29,44 @@ class Toolbox:
         scripts_desc = ", ".join([f"'{k}' ({v.get('description', '')})" for k, v in available_scripts.items()])
 
         return [
+            # -----------------------------------------------------------
+            # [新增工具] 联网能力
+            # -----------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "internet_search",
+                    "description": "Search the internet using DuckDuckGo to find real-time information, news, or technical solutions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search keywords."
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browse_website",
+                    "description": "Visit a specific URL and extract its text content. Use this AFTER 'internet_search' provides you with URLs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The URL to visit (must start with http/https)."
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }
+            },
+
             # 工具 1: 运行预定义技能 (Invoke Skill)
             {
                 "type": "function",
@@ -229,6 +271,18 @@ class Toolbox:
         script_info = scripts[skill_alias]
         base_command = script_info.get('command')
         cwd = script_info.get('cwd', None)
+        
+        # [修改点] 修复产物堆积问题：如果 cwd 为空，强制使用 ./logs/workspace
+        if not cwd:
+            # 获取日志目录，默认为 ./logs
+            log_dir = self.agent.config.get('system', {}).get('log_dir', './logs')
+            # 构造 workspace 路径
+            workspace_dir = os.path.abspath(os.path.join(log_dir, 'workspace'))
+            if not os.path.exists(workspace_dir):
+                os.makedirs(workspace_dir, exist_ok=True)
+            
+            cwd = workspace_dir
+            # print(f"[System]: Skill execution redirected to workspace: {cwd}")
         
         # 拼接参数
         final_command = base_command
@@ -466,3 +520,23 @@ class Toolbox:
             return f"Memory updated: {key} = {value}"
         except Exception as e:
             return f"Error saving fact: {e}"
+    
+    # [新增] 联网能力实现方法
+    def run_internet_search(self, query):
+        results = self.web_engine.search(query)
+        if not results:
+            return "No results found."
+        
+        # 格式化为可读字符串
+        output = f"Search Results for '{query}':\n\n"
+        for i, res in enumerate(results, 1):
+            output += f"{i}. {res['title']}\n   URL: {res['url']}\n   Snippet: {res['snippet']}\n\n"
+        output += "(Use 'browse_website' with a specific URL to read full content)"
+        return output
+
+    def run_browse_website(self, url):
+        data = self.web_engine.fetch_page(url)
+        if "error" in data:
+            return f"Error browsing page: {data['error']}"
+        
+        return f"Title: {data['title']}\nURL: {data['url']}\n\n[Page Content]:\n{data['content']}"

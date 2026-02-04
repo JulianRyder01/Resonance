@@ -7,3 +7,7 @@ pandas
 win11toast
 chromadb>=0.4.0
 plotly
+requests
+beautifulsoup4
+duckduckgo-search>=5.0.0
+lxml

@@ -1,4 +1,6 @@
-# 💠 Resonance (AI Host)
+# 💠 Resonance AI Host
+
+### Leverage the power of Large Language Models (LLMs) with your local machine's capabilities.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![Streamlit](https://img.shields.io/badge/Framework-Streamlit-red?logo=streamlit)
@@ -48,7 +50,9 @@ pip install -r requirements.txt
 #### 2. Initialize Configuration
 You need to create the configuration file `config/config.yaml`.
 
-**Option A: Quick Start (Template)**
+Two equivalent ways to create a config:
+
+**Option A: Leverage Quick Start Template**  
 Run the following command in the project root to create a default config:
 
 ```powershell
@@ -80,8 +84,32 @@ scripts:
     delay: 0
 ```
 
-#### 3. Setup Model Profiles
-Edit `config/profiles.yaml` to add your API keys.
+
+---
+
+### 3. 🚀 Usage Guide
+
+#### 1. Run Web Interface
+The main dashboard for monitoring and interaction.
+```bash
+python main.py
+```
+*Access via browser (usually http://localhost:8501).*
+
+#### 2. Run CLI Mode(Need a model profile configured)
+Quickly execute tasks without opening the UI.
+```bash
+python main.py "Check my battery status and scan D:\Projects"
+```
+### 4. Setup Model Profiles
+
+#### It's a must for Resonance to work properly.
+
+**Run the Web Interface, and you will see a side panel, configure your model profiles there.**
+
+If above method fails, please:
+
+Manually edit `config/profiles.yaml` to add your API keys.
 
 ```yaml
 # config/profiles.yaml
@@ -101,23 +129,6 @@ profiles:
     api_key: ollama
     base_url: http://localhost:11434/v1
     temperature: 0.7
-```
-
----
-
-### 🚀 Usage Guide
-
-#### 1. Run Web Interface
-The main dashboard for monitoring and interaction.
-```bash
-python main.py
-```
-*Access via browser (usually http://localhost:8501).*
-
-#### 2. Run CLI Mode
-Quickly execute tasks without opening the UI.
-```bash
-python main.py "Check my battery status and scan D:\Projects"
 ```
 
 [![Star History Chart](https://api.star-history.com/svg?repos=JulianRyder01/Resonance&type=Date)](https://star-history.com/JulianRyder01/Resonance&Date)
@@ -161,7 +172,7 @@ pip install -r requirements.txt
 #### 2. 初始化配置文件
 你需要创建 `config/config.yaml` 才能运行程序。
 
-**方法 A：使用模板命令**
+**使用模板命令**
 在项目根目录运行以下命令快速复制模板：
 
 ```powershell
@@ -169,8 +180,9 @@ pip install -r requirements.txt
 copy config\config.yaml.template config\config.yaml
 ```
 
-**方法 B：手动创建 (模板内容)**
-如果项目中没有模板文件，请手动新建 `config/config.yaml` 并填入以下内容：
+**如果以上方法失效：**
+
+请手动新建 `config/config.yaml` 并填入以下内容：
 
 ```yaml
 # config/config.yaml
@@ -193,7 +205,26 @@ scripts:
     delay: 0
 ```
 
-#### 3. 配置模型密钥
+
+### 3. 🚀 运行
+
+```bash
+# 启动 Web 图形界面
+python main.py
+
+# 或者使用命令行模式快速执行
+python main.py "帮我看看 D盘 有什么项目"
+```
+
+### 4. 配置模型密钥
+
+#### Resonance 必须配置好LLM才能使用！
+
+请按上一步的指引运行起来，你会在浏览器界面看见Resonance UI。
+
+左侧栏选择配置模型，可以在这里输入你的模型与密钥。
+
+**如果以上方法失效：**
 编辑 `config/profiles.yaml` 填入你的模型信息：
 
 ```yaml
@@ -215,17 +246,6 @@ profiles:
     base_url: http://localhost:11434/v1
     temperature: 0.7
 ```
-
-### 🚀 运行
-
-```bash
-# 启动 Web 图形界面
-python main.py
-
-# 或者使用命令行模式快速执行
-python main.py "帮我看看 D盘 有什么项目"
-```
-
 ---
 
 **Resonance** - *Echoing Intelligence Locally.*

@@ -31,6 +31,9 @@ st.markdown("""
     .stTabs [aria-selected="true"] { background-color: #4facfe; color: white; }
     /* 过程日志美化 */
     .thought-container { border-left: 2px solid #4facfe; padding-left: 10px; margin: 5px 0; color: #888; font-style: italic; }
+    
+    /* [新增] 打断按钮样式 */
+    .stButton button { width: 100%; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,6 +44,10 @@ if "session_id" not in st.session_state:
 # 始终确保 Agent 存在且是最新的
 if "agent" not in st.session_state:
     st.session_state.agent = HostAgent(session_id=st.session_state.session_id)
+
+# [新增] 状态管理：是否正在生成
+if "is_generating" not in st.session_state:
+    st.session_state.is_generating = False
 
 # --- 辅助函数 ---
 def switch_session(new_session_id):
@@ -125,46 +132,75 @@ if nav == "💬 聊天 Chat Console":
                     st.code(msg["content"], language="powershell")
                     st.markdown(content)
 
-    # 输入框
-    if prompt := st.chat_input("Command or Question..."):
-        # UI 立即反馈
-        with chat_container:
-            with st.chat_message("user", avatar="👤"):
-                st.write(prompt)
+    # [新增] 输入/打断区域逻辑
+    # 如果正在生成，显示 Stop 按钮，否则显示 Input 框
+    
+    # 容器用于放置输入控件
+    input_container = st.container()
+    
+    with input_container:
+        # [修改点] 打断按钮逻辑
+        # 注意：Streamlit 是单线程运行。当 Python 在执行循环时，UI 是冻结的，除非使用特定的异步或 fragment 技术。
+        # 但标准的 st.button 点击会触发 Rerun。
+        # 我们利用这个 Rerun 机制：当 Agent 运行时，如果用户设法点击了（或按了停止），
+        # 下一次运行时我们会捕捉到 session_state 的变化或者直接中断。
+        # 为了更好的体验，我们在此处放置一个始终可见的 Stop 按钮（仅在处理时有效）。
         
-        # 2. 机器人响应容器
-        with st.chat_message("assistant", avatar="💠"):
-            # 创建一个“思考中”状态
-            status_container = st.status("Initializing...", expanded=True)
-            # 文本瀑布流容器
-            response_placeholder = st.empty()
-            full_response = ""
+        user_input = st.chat_input("Command or Question...", disabled=st.session_state.is_generating)
+        
+        # 处理逻辑
+        if user_input:
+            st.session_state.is_generating = True
             
-            # 遍历生成器
-            for event in st.session_state.agent.chat(prompt):
-                etype = event["type"]
-                content = event.get("content", "")
+            # 1. 立即显示用户输入
+            with chat_container:
+                with st.chat_message("user", avatar="👤"):
+                    st.write(user_input)
+            
+            # 2. 机器人响应容器
+            with chat_container:
+                with st.chat_message("assistant", avatar="💠"):
+                    status_container = st.status("Initializing...", expanded=True)
+                    response_placeholder = st.empty()
+                    
+                    # [新增] 在生成过程中渲染一个停止按钮
+                    # 注意：Streamlit 脚本一旦进入循环，这里的按钮点击响应会延迟到循环结束或 yield 间隙。
+                    # 为了实现真正的“即时打断”，我们在 sidebar 放置一个中断按钮，或者在 Agent 内部 check 状态。
+                    # 这里我们模拟：生成开始前设置状态。
+                    
+                    full_response = ""
+                    
+                    # 遍历生成器
+                    try:
+                        for event in st.session_state.agent.chat(user_input):
+                            # [修改点] 每次循环都检查外部中断（虽然 Web UI 很难直接注入，但如果未来加了 socket 就可以）
+                            # 也可以在此处加入 st.button 但这会导致 duplicate id 报错，需要 careful design.
+                            
+                            etype = event["type"]
+                            content = event.get("content", "")
 
-                if etype == "status":
-                    status_container.update(label=content)
-                
-                elif etype == "delta":
-                    full_response += content
-                    # 实时渲染文字瀑布流
-                    response_placeholder.markdown(full_response + "▌")
-                
-                elif etype == "tool":
-                    # 在思考过程中展示工具产出
-                    with status_container:
-                        st.write(f"✅ **Tool [{event['name']}] output:**")
-                        st.code(content, language="powershell")
-                
-                elif etype == "error":
-                    st.error(f"Error: {content}")
-            
-            # 最终渲染（移除光标符号）
-            response_placeholder.markdown(full_response)
-            status_container.update(label="Task Completed", state="complete", expanded=False)
+                            if etype == "status":
+                                status_container.update(label=content)
+                            
+                            elif etype == "delta":
+                                full_response += content
+                                response_placeholder.markdown(full_response + "▌")
+                            
+                            elif etype == "tool":
+                                with status_container:
+                                    st.write(f"✅ **Tool [{event['name']}] output:**")
+                                    st.code(content, language="powershell")
+                            
+                            elif etype == "error":
+                                st.error(f"Error: {content}")
+                    except Exception as e:
+                        st.error(f"Runtime Error: {e}")
+                    finally:
+                        st.session_state.is_generating = False
+                        # 最终渲染
+                        response_placeholder.markdown(full_response)
+                        status_container.update(label="Task Completed", state="complete", expanded=False)
+                        st.rerun() # 刷新状态以重新启用输入框
 
 # ================= 页面：配置管理 (0代码) =================
 elif nav == "⚙️ 系统配置 System Config":

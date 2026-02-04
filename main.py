@@ -1,6 +1,12 @@
 # main.py
 import os
 import sys
+import threading
+import queue
+import tkinter as tk
+from tkinter import ttk
+import argparse
+import subprocess
 
 # === 新增：抢占式初始化 ONNX ===
 try:
@@ -14,15 +20,167 @@ except Exception:
 import subprocess
 import argparse
 from core.host_agent import HostAgent
-from win11toast import toast
 
-# =========================================================================
-# 修改说明：
-# 1. 移除了旧版直接打印 agent.chat 结果的逻辑。
-# 2. 重构了 run_cli 函数，使其能够消费 agent.chat 返回的生成器。
-# 3. 引入了实时终端输出逻辑 (sys.stdout.write)，支持流式显示内容。
-# 4. 增加了对 status, delta, tool, error 不同事件类型的分支处理。
-# =========================================================================
+class ResonanceHUD:
+    """
+    一个优雅的、悬浮的 HUD 窗口，用于替代简陋的命令行输出。
+    支持流式文本渲染、即时输入和打断功能。
+    """
+    def __init__(self, agent, initial_query=None):
+        self.agent = agent
+        self.root = tk.Tk()
+        self.root.title("Resonance AI HUD")
+        
+        # --- 窗口配置 ---
+        self.root.attributes("-alpha", 0.96)  # 轻微透明
+        self.root.attributes("-topmost", True) # 始终置顶
+        
+        # 居中与尺寸
+        width = 800
+        height = 600
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 3 # 偏上一点，符合 Spotlight 习惯
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        
+        self.root.configure(bg="#1e1e1e")
+        
+        # --- UI 布局 ---
+        # 1. 顶部状态栏
+        self.status_var = tk.StringVar(value="Resonance Ready")
+        self.lbl_status = tk.Label(self.root, textvariable=self.status_var, bg="#1e1e1e", fg="#4facfe", font=("Consolas", 10))
+        self.lbl_status.pack(side="top", fill="x", padx=10, pady=5)
+        
+        # 2. 聊天内容显示区 (Text Widget)
+        self.txt_display = tk.Text(self.root, bg="#2d2d2d", fg="#e0e0e0", 
+                                   font=("Segoe UI", 11), wrap="word", 
+                                   borderwidth=0, highlightthickness=0,
+                                   state="disabled") # 初始只读
+        self.txt_display.pack(expand=True, fill="both", padx=15, pady=5)
+        
+        # 配置 Tag 样式 (Markdown 模拟)
+        self.txt_display.tag_config("user", foreground="#88c0d0", font=("Segoe UI", 11, "bold"))
+        self.txt_display.tag_config("ai", foreground="#e0e0e0")
+        self.txt_display.tag_config("tool", foreground="#d08770", font=("Consolas", 10))
+        self.txt_display.tag_config("error", foreground="#bf616a")
+        self.txt_display.tag_config("status", foreground="#5e81ac", font=("Consolas", 9, "italic"))
+
+        # 3. 底部输入区
+        input_frame = tk.Frame(self.root, bg="#1e1e1e")
+        input_frame.pack(side="bottom", fill="x", padx=15, pady=10)
+        
+        self.entry_input = tk.Entry(input_frame, bg="#3b4252", fg="white", 
+                                    font=("Segoe UI", 12), borderwidth=0, 
+                                    insertbackground="white")
+        self.entry_input.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=5)
+        self.entry_input.bind("<Return>", self.on_send)
+        
+        # 按钮
+        self.btn_send = tk.Button(input_frame, text="Send", command=self.on_send, 
+                                  bg="#4facfe", fg="white", font=("Segoe UI", 10, "bold"),
+                                  relief="flat", activebackground="#3b8eea", activeforeground="white")
+        self.btn_send.pack(side="right")
+        
+        # --- 逻辑控制 ---
+        self.msg_queue = queue.Queue()
+        self.is_generating = False
+        
+        # 初始 Query 处理
+        if initial_query:
+            self.entry_input.insert(0, initial_query)
+            self.on_send() # 自动发送
+            
+        # 启动队列监听器
+        self.root.after(100, self.process_queue)
+        
+    def append_text(self, text, tag=None):
+        """线程安全的文本追加"""
+        self.txt_display.config(state="normal")
+        self.txt_display.insert("end", text, tag)
+        self.txt_display.see("end")
+        self.txt_display.config(state="disabled")
+
+    def process_queue(self):
+        """主线程轮询队列"""
+        try:
+            while True:
+                msg = self.msg_queue.get_nowait()
+                m_type = msg.get("type")
+                content = msg.get("content")
+                
+                if m_type == "status":
+                    self.status_var.set(f"⚡ {content}")
+                    self.append_text(f"\n[System]: {content}\n", "status")
+                    
+                elif m_type == "delta":
+                    self.append_text(content, "ai")
+                    
+                elif m_type == "tool":
+                    self.append_text(f"\n\n🛠️ Tool Output [{msg.get('name')}]:\n{content}\n", "tool")
+                    
+                elif m_type == "error":
+                    self.append_text(f"\n❌ Error: {content}\n", "error")
+                    
+                elif m_type == "user":
+                    self.append_text(f"\n👤 You: {content}\n", "user")
+                    self.append_text("💠 Resonance: ", "ai") # 前缀
+                
+                elif m_type == "done":
+                    self.is_generating = False
+                    self.status_var.set("Ready")
+                    self.btn_send.config(text="Send", bg="#4facfe")
+                    
+        except queue.Empty:
+            pass
+        
+        self.root.after(100, self.process_queue)
+
+    def run_agent_task(self, query):
+        """后台线程运行 Agent"""
+        try:
+            # 传递用户消息到 UI
+            self.msg_queue.put({"type": "user", "content": query})
+            
+            for event in self.agent.chat(query):
+                self.msg_queue.put(event)
+                
+        except Exception as e:
+            self.msg_queue.put({"type": "error", "content": str(e)})
+        finally:
+            self.msg_queue.put({"type": "done"})
+
+    def on_send(self, event=None):
+        """处理发送/打断逻辑"""
+        query = self.entry_input.get().strip()
+        
+        if self.is_generating:
+            # 如果正在生成，按钮功能变为“打断”
+            # 或者如果用户输入 /stop
+            if query == "/stop" or event is None: # event is None means button click check
+                self.agent.interrupt()
+                self.entry_input.delete(0, "end")
+                return
+        
+        if not query:
+            return
+            
+        # 这里特别处理 /stop 命令，防止它作为 query 发送
+        if query == "/stop":
+             if self.is_generating:
+                 self.agent.interrupt()
+             return
+
+        self.is_generating = True
+        self.btn_send.config(text="Stop", bg="#bf616a") # 变红
+        self.entry_input.delete(0, "end")
+        
+        # 启动线程
+        t = threading.Thread(target=self.run_agent_task, args=(query,), daemon=True)
+        t.start()
+
+    def start(self):
+        self.root.mainloop()
 
 def check_env():
     """环境自检"""
@@ -51,6 +209,19 @@ def run_gui():
         subprocess.run(cmd)
     except KeyboardInterrupt:
         print("\nResonance Stopped.")
+
+
+def run_hud_mode(query, session_id):
+    """启动 HUD 模式"""
+    if not check_env(): return
+    
+    # 预加载 Agent (稍慢，但只需要一次)
+    print("Loading Resonance Core...")
+    agent = HostAgent(session_id=session_id)
+    
+    # 启动 UI
+    hud = ResonanceHUD(agent, initial_query=query)
+    hud.start()
 
 def run_cli(query, session_id):
     """
@@ -128,8 +299,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.query:
-        # 命令行模式
-        run_cli(args.query, args.session)
+        # TODO 命令行模式作为备选项，放在这里不要删，未来实现的时候看见这个需要加上参数 -h 实现hud展示，不加就是无hud。
+        # run_cli(args.query, args.session)
+        run_hud_mode(args.query, args.session)
     else:
         # GUI 模式
         run_gui()

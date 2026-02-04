@@ -19,6 +19,9 @@ class HostAgent:
         self.profiles_path = "config/profiles.yaml"
         self.user_profile_path = "config/user_profile.yaml"
         
+        # [新增] 打断控制标志
+        self.stop_flag = False
+        
         # 加载所有配置
         self.load_all_configs()
         
@@ -231,14 +234,20 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             # 这里的异常绝对不能影响主线程
             print(f"[Memory System Error]: {e}")
 
-    # =========================================================================
-    # [核心修改点] 正确实现的 ReAct 交互逻辑 (多工具支持 & 循环推理)
-    # =========================================================================
+    # [新增] 外部调用中断方法
+    def interrupt(self):
+        """触发中断信号"""
+        print("[System]: Interrupt signal received.")
+        self.stop_flag = True
+
     def chat(self, user_input):
         """
         主交互逻辑 (Generator):
         Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
         """
+        # [修改点] 重置打断标志
+        self.stop_flag = False
+        
         try:
             # 1. 初始化上下文
             top_k = self.config['system'].get('memory', {}).get('retrieve_top_k', 3)
@@ -266,6 +275,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             final_full_content = ""
 
             while current_iteration < max_iterations:
+                # [修改点] 循环开始前检查打断
+                if self.stop_flag:
+                    yield {"type": "status", "content": "⛔ Task Interrupted by User."}
+                    break
+
                 current_iteration += 1
                 yield {"type": "status", "content": f"Thinking (Step {current_iteration})..."}
 
@@ -282,28 +296,40 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 full_response_content = ""
                 tool_calls_buffer = {} # 用于收集流式的 tool_calls
 
-                for chunk in response:
-                    delta = chunk.choices[0].delta
-                    
-                    # A. 处理文本流
-                    if delta.content:
-                        full_response_content += delta.content
-                        yield {"type": "delta", "content": delta.content}
-                    
-                    # B. 处理工具调用流
-                    if delta.tool_calls:
-                        for tc_chunk in delta.tool_calls:
-                            idx = tc_chunk.index
-                            if idx not in tool_calls_buffer:
-                                tool_calls_buffer[idx] = {
-                                    "id": tc_chunk.id,
-                                    "name": tc_chunk.function.name,
-                                    "arguments": ""
-                                }
-                            if tc_chunk.function.arguments:
-                                tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
+                # [修改点] 鲁棒性：Stream处理循环
+                try:
+                    for chunk in response:
+                        # [修改点] 实时流检查打断
+                        if self.stop_flag:
+                            response.close() # 显式关闭连接
+                            yield {"type": "status", "content": "⛔ Generating Interrupted."}
+                            # 即使打断，也应该保存已经生成的文本，防止记忆断层
+                            break 
 
-                # 记录 AI 的思考文字
+                        delta = chunk.choices[0].delta
+                        
+                        if delta.content:
+                            full_response_content += delta.content
+                            yield {"type": "delta", "content": delta.content}
+                        
+                        if delta.tool_calls:
+                            for tc_chunk in delta.tool_calls:
+                                idx = tc_chunk.index
+                                if idx not in tool_calls_buffer:
+                                    tool_calls_buffer[idx] = {
+                                        "id": tc_chunk.id,
+                                        "name": tc_chunk.function.name,
+                                        "arguments": ""
+                                    }
+                                if tc_chunk.function.arguments:
+                                    tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
+                except Exception as e:
+                    yield {"type": "error", "content": f"Stream error: {str(e)}"}
+                    break
+                
+                # 如果是被打断跳出 for loop 的，这里 full_response_content 可能只有一半
+                # 我们依然记录它，避免下一次对话上下文丢失
+                
                 if full_response_content:
                     turn_log_for_extraction += f"AI Thought: {full_response_content}\n"
 
@@ -318,6 +344,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
                 # 记录到内存 (模拟原有非流式逻辑的保存)
                 if active_tool_calls:
+                    # 如果有工具调用，必须完整记录，否则下一次API调用会报错(400)
                     self.memory.add_ai_tool_call(full_response_content, active_tool_calls)
                     # 将这一轮的响应加入上下文
                     messages.append({
@@ -336,11 +363,20 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     messages.append({"role": "assistant", "content": full_response_content})
                     final_full_content = full_response_content
 
-                # C. 执行工具（如果有）
+                # [修改点] 如果已经打断，且没有工具调用，直接退出外层循环
+                if self.stop_flag:
+                    break
+
+                # C. 执行工具
                 if not active_tool_calls:
                     break
                 
                 for tc in active_tool_calls:
+                    # [修改点] 工具执行前检查打断
+                    if self.stop_flag:
+                        yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
+                        break
+
                     func_name = tc.function.name
                     try:
                         args = json.loads(tc.function.arguments)
@@ -421,6 +457,13 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     keyword=args.get("keyword")
                 )
             
+            # [修改点] 增加联网工具路由
+            elif function_name == "internet_search":
+                return self.toolbox.run_internet_search(args.get("query"))
+            
+            elif function_name == "browse_website":
+                return self.toolbox.run_browse_website(args.get("url"))
+
             else:
                 return f"Error: Unknown tool '{function_name}'"
         except Exception as e:

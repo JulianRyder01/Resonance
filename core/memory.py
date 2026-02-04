@@ -118,58 +118,70 @@ class ConversationMemory:
 
     def _sanitize_context(self, messages: List[Dict]) -> List[Dict]:
         """
-        [鲁棒性核心] 修复损坏的对话链。
-        OpenAI 规定：Assistant 如果有 tool_calls，紧接着必须是 tool 类型的消息。
-        如果由于程序崩溃导致 history 中只有 call 没有 tool output，这里会自动补全，防止 400 Error。
+        [鲁棒性增强] 强制性格式修复。
+        遵循 OpenAI 规范：Assistant(tool_calls) 后面必须紧跟对应的 Tool 响应。
         """
-        sanitized_msgs = []
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            sanitized_msgs.append(msg)
-            
-            # 检查是否是发起工具调用的消息
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                expected_ids = [tc['id'] for tc in msg['tool_calls']]
-                
-                # 向后寻找对应的 tool 消息
-                found_ids = set()
-                j = i + 1
-                while j < len(messages):
-                    next_msg = messages[j]
-                    if next_msg.get("role") == "tool":
-                        found_ids.add(next_msg.get("tool_call_id"))
-                        sanitized_msgs.append(next_msg)
-                        j += 1
-                    else:
-                        # 遇到了非 tool 消息（如 user），说明中间断了
-                        break
-                
-                # 检查是否有遗漏的 tool_call_id
-                missing_ids = set(expected_ids) - found_ids
-                for missing_id in missing_ids:
-                    # [修复动作] 插入一个错误信息，闭合逻辑链
-                    print(f"[Memory Auto-Fix]: Detected interrupted tool call {missing_id}. Injecting error response.")
-                    sanitized_msgs.append({
+        if not messages:
+            return []
+
+        sanitized = []
+        # 用于追踪当前必须立刻出现的 tool_call_id
+        pending_ids = []
+
+        for msg in messages:
+            role = msg.get("role")
+
+            # 1. 处理 Tool 消息
+            if role == "tool":
+                tid = msg.get("tool_call_id")
+                # 如果这个 tool 消息在“待处理”名单里，或者它是孤儿但我们允许它通过(后续会剔除)，记录它
+                if tid in pending_ids:
+                    pending_ids.remove(tid)
+                    sanitized.append(msg)
+                else:
+                    # 如果是一个孤儿 Tool 消息（前面没有 Assistant 调用它），直接丢弃
+                    # 因为 API 会报错 400
+                    continue
+
+            # 2. 如果当前有 pending_ids，但接下来的消息不是 tool
+            elif pending_ids:
+                # 这是一个格式错误！必须在这里强制插入缺失的 Tool 结果
+                for missing_id in pending_ids:
+                    sanitized.append({
                         "role": "tool",
                         "tool_call_id": missing_id,
-                        "content": "Error: Tool execution was interrupted or timed out in a previous session. No output available."
+                        "content": "Error: Tool execution was interrupted. System recovered."
                     })
-                
-                # 更新 i 到 j 的位置，继续处理后续消息
-                i = j 
-                continue
+                pending_ids = []
+                # 补完缺失的后，再把当前的 user/assistant 消息加进去
+                sanitized.append(msg)
+                # 如果当前消息又是 assistant 且带 tool_calls，开启新一轮追踪
+                if role == "assistant" and msg.get("tool_calls"):
+                    pending_ids = [tc['id'] for tc in msg['tool_calls']]
             
-            i += 1
+            # 3. 处理正常的 Assistant 带工具调用
+            elif role == "assistant" and msg.get("tool_calls"):
+                pending_ids = [tc['id'] for tc in msg['tool_calls']]
+                sanitized.append(msg)
             
-        return sanitized_msgs
+            # 4. 正常消息
+            else:
+                sanitized.append(msg)
 
-    def get_active_context(self, include_summary=True) -> List[Dict]:
+        # 5. 循环结束检查：如果结尾还有没闭合的 tool_calls
+        if pending_ids:
+            for missing_id in pending_ids:
+                sanitized.append({
+                    "role": "tool",
+                    "tool_call_id": missing_id,
+                    "content": "Error: Tool sequence incomplete at log end."
+                })
+        
+        return sanitized
+
+    def get_active_context(self) -> List[Dict]:
         """
-        获取用于发送给 API 的上下文：
-        1. 包含 System Prompt (由 Agent 负责，这里只返回对话历史)
-        2. 包含最近的 N 条消息 (Sliding Window)
-        3. [新增] 自动修复损坏的 Tool Chain
+        获取上下文并进行滑动窗口处理。
         """
         full_history = self._read_full_log()
         
@@ -192,16 +204,15 @@ class ConversationMemory:
                     break
             else:
                 break
-        
-        # 2. [关键修改] 数据清洗与修复
-        # 在发送给 LLM 之前，必须保证数据结构的完整性
-        sanitized_msgs = self._sanitize_context(window_msgs)
+
+        # 3. 执行自愈清洗
+        sanitized = self._sanitize_context(window_msgs)
 
         # 3. 格式清洗 (去除 timestamp 等 OpenAI 不接受的字段)
         clean_history = []
-        for msg in sanitized_msgs:
-            clean_msg = {k: v for k, v in msg.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]}
-            # OpenAI 不允许 tool 消息有 content 以外的额外字段，除了 tool_call_id
+        allowed_keys = ["role", "content", "tool_calls", "tool_call_id", "name"]
+        for msg in sanitized:
+            clean_msg = {k: v for k, v in msg.items() if k in allowed_keys}
             clean_history.append(clean_msg)
         return clean_history
 

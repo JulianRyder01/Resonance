@@ -249,11 +249,13 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
         self.stop_flag = False
         
         try:
-            # 1. 初始化上下文
+            # 记录初始用户消息
+            self.memory.add_user_message(user_input)
+            # 2. 准备工具和检索
             top_k = self.config['system'].get('memory', {}).get('retrieve_top_k', 3)
             relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k)
             
-            # 2. 构建动态 System Prompt
+            # 构建动态 System Prompt
             dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs)
             
             # messages 列表将作为我们在这一轮推理中的“工作区”
@@ -264,8 +266,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             # 2. 准备工具
             tools = self.toolbox.get_tool_definitions()
 
-            # 3. 记录初始用户消息
-            self.memory.add_user_message(user_input)
+            
 
             # 4. 进入 ReAct 循环
             # 用于萃取的全量日志记录（本轮对话）
@@ -281,6 +282,12 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     break
 
                 current_iteration += 1
+
+                # [关键修改]：每一轮推理都重新从 memory 获取经清洗后的上下文
+                # 不要相信上一个循环里的 messages 列表，因为它可能在打断后受损
+                messages = [{"role": "system", "content": dynamic_sys_prompt}]
+                messages += self.memory.get_active_context() 
+
                 yield {"type": "status", "content": f"Thinking (Step {current_iteration})..."}
 
                 # 调用 OpenAI Stream

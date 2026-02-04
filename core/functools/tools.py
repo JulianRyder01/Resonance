@@ -1,5 +1,6 @@
 # core/functools/tools.py
-# [新增文件] 将工具逻辑与定义从 HostAgent 解耦
+# [修改说明] 修复了Windows下subprocess读取输出时的UnicodeDecodeError (GBK编码崩溃)
+# [修改说明] 增强了 execute_shell 的鲁棒性，采用“混合解码”策略
 import os
 import sys
 import subprocess
@@ -230,27 +231,54 @@ class Toolbox:
 
     # --- 具体实现 ---
 
-    def execute_shell(self, command, cwd=None, timeout=120):
-        """执行 PowerShell 命令"""
+    def _safe_decode(self, byte_data):
+        """
+        [新增] 安全解码函数：解决 Windows 终端 GBK 与 UTF-8 混杂导致的崩溃问题
+        """
+        if not byte_data:
+            return ""
+        
+        # 1. 优先尝试 UTF-8 (最通用)
         try:
-            # 环境准备：强制使用 UTF-8，防止中文乱码
+            return byte_data.decode('utf-8')
+        except UnicodeDecodeError:
+            pass
+        
+        # 2. 尝试 GBK (Windows 默认)
+        try:
+            return byte_data.decode('gbk')
+        except UnicodeDecodeError:
+            pass
+        
+        # 3. 最后尝试忽略错误的 UTF-8
+        return byte_data.decode('utf-8', errors='ignore')
+
+    def execute_shell(self, command, cwd=None, timeout=120):
+        """执行 PowerShell 命令 (增强鲁棒性版)"""
+        try:
+            # 环境准备：强制子进程使用 UTF-8，防止乱码
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            env["LANG"] = "C.UTF-8"
             
+            # [修改点] 这里的关键是 text=False，捕获原始字节流，避免 subprocess 内部使用默认 gbk 解码崩溃
             result = subprocess.run(
                 ["powershell", "-Command", command],
                 capture_output=True,
-                text=True,
+                text=False,  # <--- 关键修改：禁止自动解码
                 cwd=cwd,
                 timeout=timeout,
-                encoding='gbk', # Windows PowerShell 默认输出通常是 GBK
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 env=env
             )
             
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[STDERR]: {result.stderr}"
+            # 手动安全解码
+            stdout_str = self._safe_decode(result.stdout)
+            stderr_str = self._safe_decode(result.stderr)
+            
+            output = stdout_str
+            if stderr_str:
+                output += f"\n[STDERR]: {stderr_str}"
             
             if not output.strip():
                 return "[System]: Command executed successfully (No visual output)."

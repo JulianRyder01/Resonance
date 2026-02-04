@@ -1,14 +1,68 @@
-logs
+# ========================
+# 1. 核心安全 (绝对不能漏)
+# ========================
+# 包含 API Key 的文件
+config/profiles.yaml
+# 包含用户路径和隐私习惯的文件
+config/user_profile.yaml
+# 系统主配置文件 (建议保留模板，忽略实际配置)
+config/config.yaml
+# 排除备份文件
+*.backup
+*.bak
+
+# ========================
+# 2. 运行时产物 (防止垃圾提交)
+# ========================
+# 你的代码生成的日志文件夹
+logs/
+# 你的代码可能生成的截图 (WebEngine/Selenium截图)
+*.png
+*.jpg
+*.jpeg
+# 你的代码抓取的网页数据
+webpage_data_*.json
+# 任何日志文件
+*.log
+
+# ========================
+# 3. Python 标准忽略
+# ========================
+__pycache__/
+*.pyc
+# 虚拟环境 (非常重要，防止提交几万个库文件)
+venv/
+env/
+.venv/
+.conda/
+
+# ========================
+# 4. 数据库与缓存
+# ========================
+# ChromaDB 或 SQLite 数据库文件
+*.sqlite3
+*.db
+# 临时文件
+*.tmp
+
+# ========================
+# 5. IDE 配置 (个人喜好，不应上传)
+# ========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ========================
+# 6. 例外规则 (允许提交的文件)
+# ========================
+# 允许提交模板文件，方便别人使用
+!config/profiles.yaml.template
+!config/config.yaml.template
+
+# ========================
+# 7. 用户特定的忽略 (你原来列表里的)
+# ========================
+# 如果这些是你不想上传的临时工具，可以保留
 DirLister.py
 directory_listing_with_content.txt
-.vscode
-config/config.yaml
-config/profiles.yaml
-config/user_profile.yaml
-__pycache__/
-core/__pycache__
-.pyc
-.backup
-config/config.yaml.backup
-
-core/functools/__pycache__/tools.cpython-311.pyc

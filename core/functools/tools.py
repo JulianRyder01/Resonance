@@ -366,9 +366,13 @@ class Toolbox:
             return f"Error reading file: {str(e)}"
 
     # [新增] 目录列表工具
+    # [修改后] 增强版目录列表工具：支持树状结构显示，确保文件夹不遗漏
     def list_directory_files(self, directory_path, recursive=True, depth=2):
         """
-        递归列出目录文件，返回类似于 tree 命令的结构字符串。
+        列出目录下的文件和文件夹结构。
+        :param directory_path: 绝对路径
+        :param recursive: 是否递归遍历
+        :param depth: 递归深度限制
         """
         if not os.path.exists(directory_path):
             return f"Error: Directory '{directory_path}' does not exist."
@@ -380,51 +384,60 @@ class Toolbox:
         IGNORE_DIRS = {'.git', '.idea', '.vscode', '__pycache__', 'node_modules', 'venv', '.obsidian'}
         IGNORE_EXTS = {'.exe', '.dll', '.so', '.dylib', '.class', '.pyc', '.png', '.jpg', '.jpeg', '.zip', '.tar', '.gz'}
 
-        output_lines = []
-        root_level = directory_path.rstrip(os.path.sep).count(os.path.sep)
-        
-        max_files_limit = 100 # 防止 context 爆炸
-        file_count = 0
+        results = []
+        self.file_count = 0
+        self.max_files_limit = 150  # 适当增加上限，防止遗漏关键结构
 
-        for root, dirs, files in os.walk(directory_path):
-            # 控制深度
-            current_level = root.count(os.path.sep)
-            if current_level - root_level > depth:
-                continue
+        def _build_tree(current_dir, current_depth, prefix=""):
+            if current_depth > depth:
+                return
+
+            try:
+                # 获取目录下所有项并排序（文件夹在前，文件在后）
+                entries = os.listdir(current_dir)
+                entries.sort(key=lambda x: (not os.path.isdir(os.path.join(current_dir, x)), x.lower()))
+            except Exception as e:
+                results.append(f"{prefix}[Permission Denied: {e}]")
+                return
+
+            for i, entry in enumerate(entries):
+                if self.file_count >= self.max_files_limit:
+                    if i == 0: results.append(f"{prefix}... [Output truncated due to limit]")
+                    break
+
+                full_path = os.path.join(current_dir, entry)
+                is_last = (i == len(entries) - 1)
+                connector = "└── " if is_last else "├── "
                 
-            # 过滤目录
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-            
-            # 计算缩进
-            indent_level = current_level - root_level
-            indent = "  " * indent_level
-            
-            folder_name = os.path.basename(root)
-            if indent_level == 0:
-                 output_lines.append(f"📂 {directory_path}")
-            else:
-                 output_lines.append(f"{indent}📂 {folder_name}/")
-
-            # 列出文件
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                if ext in IGNORE_EXTS:
+                # 检查是否在忽略名单
+                if entry in IGNORE_DIRS:
                     continue
-                
-                output_lines.append(f"{indent}  📄 {f}")
-                file_count += 1
-                
-                if file_count >= max_files_limit:
-                    output_lines.append(f"{indent}  ... [Truncated: Too many files]")
-                    return "\n".join(output_lines)
-            
-            if not recursive:
-                break
-        
-        if file_count == 0:
-            return f"Directory '{directory_path}' is empty or contains only ignored file types."
 
-        return "\n".join(output_lines)
+                if os.path.isdir(full_path):
+                    # 添加文件夹标识
+                    results.append(f"{prefix}{connector}📂 {entry}/")
+                    
+                    # 如果允许递归且未达深度限制，继续向下走
+                    if recursive and current_depth < depth:
+                        new_prefix = prefix + ("    " if is_last else "│   ")
+                        _build_tree(full_path, current_depth + 1, new_prefix)
+                else:
+                    # 检查文件后缀过滤
+                    ext = os.path.splitext(entry)[1].lower()
+                    if ext in IGNORE_EXTS:
+                        continue
+                        
+                    results.append(f"{prefix}{connector}📄 {entry}")
+                    self.file_count += 1
+
+        # 开始构建
+        results.append(f"📂 {directory_path}")
+        _build_tree(directory_path, 0)
+
+        if len(results) <= 1:
+            return f"Directory '{directory_path}' is empty or contains only ignored items."
+
+        return "\n".join(results)
 
     # [新增] 关键词搜索工具
     def search_files_by_keyword(self, directory_path, keyword):
@@ -469,7 +482,7 @@ class Toolbox:
                 break
         
         if not found_files:
-            return f"No files found containing '{keyword}' (Scanned {scanned_count} files)."
+            return f"{directory_path}: No files found containing '{keyword}' (Scanned {scanned_count} files)."
         
         # 返回结果列表
         result_text = f"Found '{keyword}' in the following files:\n"

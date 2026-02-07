@@ -9,6 +9,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+# [修改点] 引入 win11toast 用于桌面通知
+from win11toast import toast
 
 # 调整路径以便导入 core
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -84,6 +86,74 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# --- [核心修改] 哨兵自动响应逻辑 ---
+
+async def run_autonomous_reaction(trigger_message: str):
+    """
+    [新增] 自主反应任务：
+    当哨兵触发时，不仅通知前端，还启动 AI 进行分析和工具执行。
+    结果会实时流式传输到 WebSocket，最后通过 Toast 弹窗通知。
+    """
+    session_id = "resonance_main"
+    logger.info(f"[Auto-Reaction] Started for: {trigger_message}")
+
+    # 1. 构造触发提示词
+    # 我们告诉 AI 刚刚发生了系统警报，要求它分析
+    prompt = f"[System Sentinel Triggered]: {trigger_message}\nPlease analyze this event. If it requires action (like checking a file, looking up info), DO IT. Finally, verify if everything is OK."
+    
+    full_response_text = ""
+    
+    # 2. 通知前端 AI 开始工作了
+    await manager.broadcast({
+        "type": "system_status", 
+        "content": "🛡️ Sentinel Active: AI Host is responding...",
+        "session_id": session_id
+    })
+
+    try:
+        # 3. 运行 Agent 推理循环 (模拟用户输入)
+        # 注意：Agent.chat 是同步生成器，我们需要在循环中释放控制权给 asyncio loop
+        iterator = state.agent.chat(prompt, session_id=session_id)
+        
+        for event in iterator:
+            # 广播事件到前端（带上 session_id，让前端知道这是主进程的消息）
+            event["session_id"] = session_id
+            await manager.broadcast(event)
+            
+            # 收集最终文本用于 Toast 通知
+            if event["type"] == "delta":
+                full_response_text += event.get("content", "")
+            
+            # [关键] 让出控制权，防止阻塞 WebSocket 心跳
+            await asyncio.sleep(0.01)
+            
+        # 4. 结束信号
+        await manager.broadcast({"type": "done", "session_id": session_id})
+        
+        # 5. 发送 Windows Toast 通知
+        if full_response_text.strip():
+            # 简单清洗 Markdown 符号以便在通知中显示
+            clean_text = full_response_text.replace("**", "").replace("##", "").strip()
+            # 截断过长内容
+            display_text = clean_text[:150] + "..." if len(clean_text) > 150 else clean_text
+            
+            toast(
+                "Resonance AI",
+                display_text,
+                duration="long", # 保持较长时间
+                # on_click=... (如果需要可以加打开浏览器的回调)
+            )
+            logger.info(f"[Auto-Reaction] Completed. Notification sent.")
+
+    except Exception as e:
+        logger.error(f"[Auto-Reaction] Error: {e}")
+        await manager.broadcast({
+            "type": "error", 
+            "content": f"Auto-reaction failed: {str(e)}",
+            "session_id": session_id
+        })
+
+
 # --- 哨兵回调桥接 ---
 # 这是一个运行在 Thread 中的回调，需要安全地调用 Async 方法
 def sentinel_callback_bridge(message_str):
@@ -99,16 +169,19 @@ def sentinel_callback_bridge(message_str):
         asyncio.set_event_loop(loop)
         
     if loop.is_running():
-        # A. 写入主进程内存
+        # A. 写入主进程内存 (记录日志)
         state.agent.handle_sentinel_trigger(message_str)
 
-        # B. 广播到前端
+        # B. 广播到前端 (Toast Alert)
         payload = {
             "type": "sentinel_alert",
             "content": message_str,
             "timestamp": int(asyncio.get_event_loop().time())
         }
         asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
+        
+        # C. [新增] 启动 AI 自主响应闭环
+        asyncio.run_coroutine_threadsafe(run_autonomous_reaction(message_str), loop)
 
 # 注册回调
 state.agent.sentinel_engine.set_callback(sentinel_callback_bridge)
@@ -227,11 +300,14 @@ async def clear_session_messages(session_id: str):
 @app.get("/api/memory")
 async def get_all_memories():
     """获取所有长期记忆（RAG）"""
+    # [修改说明] 这里的 logic 移到了 rag_store.py 内部处理 robustness，这里只负责透传
     df = state.agent.rag_store.get_all_memories_as_df()
-    # 将 DataFrame 转为 Records 格式列表
-    # 处理 NaN 和 Timestamp 对象，确保 JSON 可序列化
-    df = df.fillna("")
-    data = df.astype(str).to_dict(orient="records")
+    
+    # 再次确保转为字典列表，处理可能的空 DataFrame
+    if df.empty:
+        return []
+        
+    data = df.to_dict(orient="records")
     return data
 
 @app.delete("/api/memory/{memory_id}")
@@ -281,12 +357,9 @@ async def websocket_chat(websocket: WebSocket):
             if not user_input: continue
 
             # 1. 发送用户消息确认
-            await websocket.send_json({"type": "user", "content": user_input})
+            await websocket.send_json({"type": "user", "content": user_input, "session_id": session_id})
 
-            # 2. 调用 Agent (同步生成器，需在线程池运行以免阻塞 Async Loop 吗？)
-            # HostAgent.chat 是一个 yield generator。
-            # 为了简单起见，且 Agent 内部 I/O 操作较多，我们直接迭代。
-            # 如果并发量大，建议重构 HostAgent 为 async generator。
+            # 2. 调用 Agent
             
             # 检测是否是打断命令
             if user_input == "/stop":
@@ -296,15 +369,16 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 # 迭代 Agent 的生成器，[修改点] 传入 session_id
                 for event in state.agent.chat(user_input, session_id=session_id):
-                    # 实时推送到前端
+                    # 实时推送到前端，带上 session_id 方便前端区分
+                    event["session_id"] = session_id
                     await websocket.send_json(event)
                     # 让出控制权，防止阻塞心跳
                     await asyncio.sleep(0.01)
                 
-                await websocket.send_json({"type": "done"})
+                await websocket.send_json({"type": "done", "session_id": session_id})
 
             except Exception as e:
-                await websocket.send_json({"type": "error", "content": str(e)})
+                await websocket.send_json({"type": "error", "content": str(e), "session_id": session_id})
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)

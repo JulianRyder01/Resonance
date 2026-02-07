@@ -151,7 +151,10 @@ class RAGStore:
             return False
 
     def get_all_memories_as_df(self):
-        """[新增] 导出所有记忆为 Pandas DataFrame，用于可视化分析"""
+        """
+        [修改] 导出所有记忆为 Pandas DataFrame，并进行严格的数据清洗。
+        确保没有任何 NaN、NaT 或复杂对象，以便 API 能完美序列化为 JSON。
+        """
         if not self.collection:
             return pd.DataFrame()
             
@@ -178,36 +181,32 @@ class RAGStore:
             if df.empty:
                 return pd.DataFrame(columns=['type', 'content', 'access_count', 'timestamp', 'last_accessed', 'id'])
 
-            # --- [核心修复] Schema 补全逻辑 ---
-            # 确保 UI 需要的所有列都存在，如果不存在则填充默认值
+            # --- [核心修复] Schema 补全与清洗逻辑 ---
             
-            # 1. access_count 默认为 0
-            if 'access_count' not in df.columns:
-                df['access_count'] = 0
-            else:
-                df['access_count'] = df['access_count'].fillna(0).astype(int)
-                
-            # 2. timestamp 默认为当前时间 (如果旧数据真的没有)
-            if 'timestamp' not in df.columns:
-                df['timestamp'] = datetime.datetime.now().isoformat()
-            
-            # 3. last_accessed 默认为 timestamp
-            if 'last_accessed' not in df.columns:
-                df['last_accessed'] = df['timestamp']
-            
-            # 4. type 默认为 unknown
-            if 'type' not in df.columns:
-                df['type'] = 'unknown'
-            else:
-                df['type'] = df['type'].fillna('unknown')
+            # 1. 确保核心列存在
+            required_cols = ['type', 'content', 'access_count', 'timestamp', 'last_accessed', 'id']
+            for col in required_cols:
+                if col not in df.columns:
+                    df[col] = None
 
-            # --- 类型转换 ---
-            # 将字符串时间转为 datetime 对象，以便绘图
-            for col in ['timestamp', 'last_accessed']:
-                try:
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-                except:
-                    pass
+            # 2. 填充默认值
+            df['type'] = df['type'].fillna('unknown').astype(str)
+            df['content'] = df['content'].fillna('').astype(str)
+            df['access_count'] = df['access_count'].fillna(0).astype(int)
+            
+            # 3. 处理时间：确保全部转为字符串 ISO 格式，避免 JSON 序列化失败
+            now_iso = datetime.datetime.now().isoformat()
+            
+            def safe_iso(val):
+                if not val or pd.isna(val):
+                    return now_iso
+                return str(val)
+
+            df['timestamp'] = df['timestamp'].apply(safe_iso)
+            df['last_accessed'] = df['last_accessed'].apply(safe_iso)
+            
+            # 4. 最终清洗：将所有剩余的 NaN 变为空字符串
+            df = df.fillna("")
                 
             return df
         except Exception as e:

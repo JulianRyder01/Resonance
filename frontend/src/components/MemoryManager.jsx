@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+// frontend/src/components/MemoryManager.jsx
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Trash2, Search, Database, RefreshCw, Clock, Tag } from 'lucide-react';
+import { Trash2, Search, Database, RefreshCw, Clock, Tag, BarChart3, Zap } from 'lucide-react';
 import { toast } from 'sonner';
 
 const API_BASE = "http://localhost:8000/api";
@@ -14,11 +15,15 @@ export default function MemoryManager() {
     setLoading(true);
     try {
       const res = await axios.get(`${API_BASE}/memory`);
+      // 确保数据是数组
+      const data = Array.isArray(res.data) ? res.data : [];
       // 按时间倒序
-      const sorted = res.data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const sorted = data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setMemories(sorted);
     } catch (err) {
+      console.error(err);
       toast.error("Failed to load memories");
+      setMemories([]); // 失败时重置为空数组，防止 map 报错
     } finally {
       setLoading(false);
     }
@@ -40,13 +45,35 @@ export default function MemoryManager() {
   }, []);
 
   const filtered = memories.filter(m => 
-    m.content.toLowerCase().includes(search.toLowerCase()) || 
-    m.type.toLowerCase().includes(search.toLowerCase())
+    (m.content || "").toLowerCase().includes(search.toLowerCase()) || 
+    (m.type || "").toLowerCase().includes(search.toLowerCase())
   );
+
+  // --- [新增] 数据分析逻辑 ---
+  const stats = useMemo(() => {
+    if (!memories.length) return null;
+    
+    const total = memories.length;
+    
+    // 计算类型分布
+    const typeCounts = {};
+    memories.forEach(m => {
+      const t = m.type || 'unknown';
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    
+    // 找出最热门的记忆
+    const mostAccessed = [...memories].sort((a, b) => b.access_count - a.access_count)[0];
+    
+    // 最近添加
+    const lastAdded = memories[0]; // 已经按时间倒序
+
+    return { total, typeCounts, mostAccessed, lastAdded };
+  }, [memories]);
 
   return (
     <div className="p-8 max-w-7xl mx-auto h-full flex flex-col">
-      <header className="flex justify-between items-end mb-8 shrink-0">
+      <header className="flex justify-between items-end mb-6 shrink-0">
         <div>
           <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
             <Database className="text-primary" /> Memory Core
@@ -60,6 +87,59 @@ export default function MemoryManager() {
           <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
       </header>
+
+      {/* --- [新增] 数据分析仪表盘 --- */}
+      {stats && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 shrink-0">
+          {/* Card 1: Total Volume */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+            <div className="p-3 bg-blue-50 text-blue-500 rounded-lg">
+              <Database size={24} />
+            </div>
+            <div>
+              <div className="text-sm text-slate-500 font-medium">Total Memories</div>
+              <div className="text-2xl font-bold text-slate-800">{stats.total}</div>
+            </div>
+          </div>
+
+          {/* Card 2: Top Insight */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+            <div className="p-3 bg-amber-50 text-amber-500 rounded-lg">
+              <Zap size={24} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm text-slate-500 font-medium">Most Accessed</div>
+              <div className="text-xs font-bold text-slate-800 truncate" title={stats.mostAccessed?.content}>
+                {stats.mostAccessed?.content?.substring(0, 30) || "N/A"}...
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">
+                Hits: {stats.mostAccessed?.access_count || 0}
+              </div>
+            </div>
+          </div>
+
+          {/* Card 3: Type Distribution (Simple Bar) */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-center">
+            <div className="flex items-center gap-2 text-sm text-slate-500 font-medium mb-2">
+              <BarChart3 size={16} /> Type Distribution
+            </div>
+            <div className="flex gap-1 h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+              {Object.entries(stats.typeCounts).map(([type, count], i) => {
+                const colors = ['bg-blue-500', 'bg-purple-500', 'bg-emerald-500', 'bg-amber-500', 'bg-rose-500'];
+                const width = (count / stats.total) * 100;
+                return (
+                  <div key={type} className={`${colors[i % colors.length]}`} style={{ width: `${width}%` }} title={`${type}: ${count}`} />
+                );
+              })}
+            </div>
+            <div className="flex gap-3 mt-2 text-[10px] text-slate-400">
+              {Object.entries(stats.typeCounts).slice(0, 3).map(([type, count]) => (
+                <span key={type}>{type} ({Math.round(count/stats.total*100)}%)</span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 搜索栏 */}
       <div className="mb-6 relative shrink-0">
@@ -85,10 +165,18 @@ export default function MemoryManager() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filtered.length === 0 ? (
+            {loading ? (
+               <tr>
+                <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
+                  <div className="flex justify-center items-center gap-2">
+                    <RefreshCw className="animate-spin" size={20} /> Loading database...
+                  </div>
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
               <tr>
                 <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
-                  {loading ? "Loading..." : "No memories found matching criteria."}
+                  No memories found matching criteria.
                 </td>
               </tr>
             ) : (

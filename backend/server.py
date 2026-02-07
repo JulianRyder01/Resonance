@@ -14,6 +14,7 @@ from pydantic import BaseModel
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.host_agent import HostAgent
+from core.memory import ConversationMemory
 from utils.monitor import SystemMonitor
 
 # --- 配置日志 ---
@@ -34,7 +35,8 @@ app.add_middleware(
 # --- 全局状态 ---
 class GlobalState:
     def __init__(self):
-        self.agent = HostAgent(session_id="web_session")
+        # [修改点] 默认主会话
+        self.agent = HostAgent(default_session="resonance_main")
         self.agent.sentinel_engine.start() # 启动哨兵线程
         logger.info("HostAgent & SentinelEngine Started.")
 
@@ -50,6 +52,14 @@ class ProfileUpdate(BaseModel):
 
 class ActiveProfileUpdate(BaseModel):
     profile_id: str
+
+class SessionRename(BaseModel):
+    new_name: str
+
+# [新增] CLI 聊天请求模型
+class ChatSyncRequest(BaseModel):
+    message: str
+    session_id: str = "resonance_main"
 
 # --- WebSocket 管理器 ---
 class ConnectionManager:
@@ -79,7 +89,8 @@ manager = ConnectionManager()
 def sentinel_callback_bridge(message_str):
     """
     当 SentinelEngine (线程) 触发时调用此函数。
-    我们需要将其调度到 FastAPI 的主事件循环中。
+    1. 通知前端 (Toast)
+    2. [新增] 将事件写入主进程会话，实现对话连贯
     """
     try:
         loop = asyncio.get_event_loop()
@@ -88,7 +99,10 @@ def sentinel_callback_bridge(message_str):
         asyncio.set_event_loop(loop)
         
     if loop.is_running():
-        # 构造 JSON 消息
+        # A. 写入主进程内存
+        state.agent.handle_sentinel_trigger(message_str)
+
+        # B. 广播到前端
         payload = {
             "type": "sentinel_alert",
             "content": message_str,
@@ -123,9 +137,90 @@ async def delete_sentinel(s_type: str, s_id: str):
 async def get_skills():
     return state.agent.config.get('scripts', {})
 
+# [修改点] 获取特定会话的历史记录
 @app.get("/api/history")
-async def get_history():
-    return state.agent.memory.get_full_log()
+async def get_history(session_id: str = "resonance_main"):
+    mem = state.agent.get_memory(session_id)
+    return mem.get_full_log()
+
+# --- [新增] 同步聊天接口 (供 API/CLI 调用) ---
+@app.post("/api/chat/sync")
+async def chat_sync(request: ChatSyncRequest):
+    """
+    CLI 专用接口。
+    执行完整的 ReAct 循环并返回最终文本结果。
+    """
+    full_response = ""
+    last_tool_output = ""
+    
+    # 运行生成器直到结束
+    # 注意：Agent.chat 是同步生成器，这里会阻塞当前 Worker，生产环境建议放入 run_in_executor
+    try:
+        for event in state.agent.chat(request.message, session_id=request.session_id):
+            if event['type'] == 'delta':
+                full_response += (event.get('content') or "")
+            elif event['type'] == 'tool':
+                # 记录工具输出以便如果 LLM 没有后续文本，至少能看到工具结果
+                last_tool_output = f"[Tool Executed: {event['name']} -> {str(event['content'])[:100]}...]"
+            elif event['type'] == 'error':
+                return {"status": "error", "content": event['content']}
+                
+        # 如果没有生成文本但执行了工具，返回工具提示
+        final_text = full_response if full_response.strip() else last_tool_output
+        return {
+            "status": "success", 
+            "content": final_text, 
+            "session_id": request.session_id
+        }
+    except Exception as e:
+        return {"status": "error", "content": str(e)}
+
+# --- Session Management APIs ---
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """列出所有会话"""
+    return ConversationMemory.list_sessions()
+
+@app.post("/api/sessions")
+async def create_session(session_id: str = Body(..., embed=True)):
+    """创建一个新会话（实际上就是确保加载了它）"""
+    mem = state.agent.get_memory(session_id)
+    return {"status": "created", "id": session_id}
+
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, payload: SessionRename):
+    """重命名会话"""
+    mem = state.agent.get_memory(session_id)
+    try:
+        mem.rename_session(payload.new_name)
+        # 清除旧缓存
+        if session_id in state.agent.memory_cache:
+            del state.agent.memory_cache[session_id]
+        return {"status": "renamed", "new_name": payload.new_name}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话"""
+    if session_id == "resonance_main":
+        raise HTTPException(status_code=403, detail="Cannot delete main process session.")
+    
+    success = ConversationMemory.delete_session(session_id)
+    if session_id in state.agent.memory_cache:
+        del state.agent.memory_cache[session_id]
+        
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted"}
+
+@app.delete("/api/sessions/{session_id}/messages")
+async def clear_session_messages(session_id: str):
+    """清空会话内容"""
+    mem = state.agent.get_memory(session_id)
+    mem.clear()
+    return {"status": "cleared"}
 
 # --- Memory Management APIs (New) ---
 
@@ -178,6 +273,8 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 payload = json.loads(data)
                 user_input = payload.get("message")
+                # [修改点] 支持指定会话ID，默认为主进程
+                session_id = payload.get("session_id", "resonance_main")
             except:
                 continue
             
@@ -197,8 +294,8 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             try:
-                # 迭代 Agent 的生成器
-                for event in state.agent.chat(user_input):
+                # 迭代 Agent 的生成器，[修改点] 传入 session_id
+                for event in state.agent.chat(user_input, session_id=session_id):
                     # 实时推送到前端
                     await websocket.send_json(event)
                     # 让出控制权，防止阻塞心跳
@@ -238,8 +335,8 @@ async def get_disk_status():
 # --- 静态文件服务 (生产环境) ---
 # 假设前端 build 后的文件在 frontend/dist
 # 如果是开发模式，可以注释掉这里
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
+if os.path.exists("../frontend/dist"):
+    app.mount("/", StaticFiles(directory="../frontend/dist", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn

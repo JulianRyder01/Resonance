@@ -1,51 +1,220 @@
+// frontend/src/components/ChatInterface.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Bot, User, Command, Eraser, Play } from 'lucide-react';
+import axios from 'axios';
+import { 
+  Send, Bot, User, Command, Eraser, Play, Loader2, StopCircle, 
+  MessageSquare, Plus, Trash2, Edit2, Check, X
+} from 'lucide-react';
+import { toast } from 'sonner';
+
+const API_BASE = "http://localhost:8000/api";
 
 export default function ChatInterface({ ws, isConnected }) {
+  // 会话状态
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState("resonance_main");
   const [messages, setMessages] = useState([]);
+  
+  // 交互状态
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
+  
   const scrollRef = useRef(null);
+
+  // --- [新增] URL Deep Link 支持 ---
+  useEffect(() => {
+    // 检查 URL 是否有 ?session=xxx 参数
+    const params = new URLSearchParams(window.location.search);
+    const urlSession = params.get('session');
+    if (urlSession) {
+      console.log("Deep link to session:", urlSession);
+      setActiveSessionId(urlSession);
+      // 清除 URL 参数，防止刷新时滞留（可选）
+      // window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // --- 1. 会话管理逻辑 ---
+
+  const fetchSessions = async () => {
+    setLoadingSessions(true);
+    try {
+      const res = await axios.get(`${API_BASE}/sessions`);
+      // 确保 resonance_main 始终存在
+      const list = res.data;
+      if (!list.find(s => s.id === "resonance_main")) {
+        // 如果没有主进程会话，手动加一个伪造的，等到真正产生对话会自动创建
+        list.unshift({ id: "resonance_main", preview: "System Main Process", updated_at: Date.now() });
+      }
+      setSessions(list);
+    } catch (err) {
+      toast.error("Failed to load sessions");
+    } finally {
+      setLoadingSessions(false);
+    }
+  };
+
+  const createSession = async () => {
+    const newId = `session_${Date.now()}`;
+    try {
+      await axios.post(`${API_BASE}/sessions`, { session_id: newId });
+      setActiveSessionId(newId);
+      setMessages([]);
+      fetchSessions();
+    } catch (err) {
+      toast.error("Failed to create session");
+    }
+  };
+
+  const deleteSession = async (e, id) => {
+    e.stopPropagation();
+    if (id === "resonance_main") {
+      toast.error("Cannot delete Main Process");
+      return;
+    }
+    if (!confirm("Delete this conversation?")) return;
+    
+    try {
+      await axios.delete(`${API_BASE}/sessions/${id}`);
+      if (activeSessionId === id) setActiveSessionId("resonance_main");
+      fetchSessions();
+    } catch (err) {
+      toast.error("Failed to delete");
+    }
+  };
+
+  const startRename = (e, session) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setRenameValue(session.id);
+  };
+
+  const confirmRename = async (e) => {
+    e.stopPropagation();
+    if (!renameValue.trim()) return;
+    try {
+      await axios.patch(`${API_BASE}/sessions/${editingSessionId}`, { new_name: renameValue });
+      if (activeSessionId === editingSessionId) setActiveSessionId(renameValue);
+      setEditingSessionId(null);
+      fetchSessions();
+    } catch (err) {
+      toast.error("Rename failed (Duplicate name?)");
+    }
+  };
+
+  // --- 2. 消息加载逻辑 ---
+
+  const loadHistory = async (sid) => {
+    try {
+      const res = await axios.get(`${API_BASE}/history?session_id=${sid}`);
+      setMessages(res.data);
+    } catch (err) {
+      console.error("History load error", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
+  }, []);
+
+  useEffect(() => {
+    loadHistory(activeSessionId);
+  }, [activeSessionId]);
+
+  // --- 3. WebSocket 消息处理 ---
 
   useEffect(() => {
     if (!ws) return;
+
     const handleMsg = (e) => {
       try {
         const data = JSON.parse(e.data);
+        
         if (data.type === 'delta') {
+          const deltaContent = data.content ?? ""; 
           setMessages(prev => {
             const last = prev[prev.length - 1];
             if (last?.role === 'assistant' && !last.complete) {
-              return [...prev.slice(0, -1), { ...last, content: last.content + data.content }];
+              const updatedMessages = [...prev];
+              updatedMessages[updatedMessages.length - 1] = {
+                ...last,
+                content: (last.content || "") + deltaContent
+              };
+              return updatedMessages;
             }
-            return [...prev, { role: 'assistant', content: data.content, complete: false }];
+            return [...prev, { role: 'assistant', content: deltaContent, complete: false }];
           });
-        } else if (data.type === 'user') {
+        } 
+        else if (data.type === 'user') {
           setMessages(prev => [...prev, { role: 'user', content: data.content }]);
           setIsTyping(true);
-        } else if (data.type === 'done') {
+        } 
+        else if (data.type === 'done') {
           setMessages(prev => prev.map(m => ({ ...m, complete: true })));
           setIsTyping(false);
-        } else if (data.type === 'tool') {
-          setMessages(prev => [...prev, { role: 'tool', name: data.name, content: data.content }]);
-        } else if (data.type === 'status') {
-          // 可选：显示思考状态
+          // 刷新列表以更新预览
+          fetchSessions();
+        } 
+        else if (data.type === 'tool') {
+          setMessages(prev => [...prev, { 
+            role: 'tool', 
+            name: data.name, 
+            content: String(data.content ?? "No output") 
+          }]);
+        } 
+        else if (data.type === 'error') {
+          toast.error("AI Core Error", { description: data.content });
+          setIsTyping(false);
         }
       } catch (err) {
-        console.error("Msg Parse Error", err);
+        console.error("WS Message Parse Error:", err);
       }
     };
+
     ws.addEventListener('message', handleMsg);
     return () => ws.removeEventListener('message', handleMsg);
   }, [ws]);
 
-  useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  // 自动滚动
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isTyping]);
 
   const sendMessage = () => {
     if (!input.trim() || !isConnected) return;
-    ws.send(JSON.stringify({ message: input }));
-    setInput("");
+    try {
+      // [关键] 发送时携带 session_id
+      ws.send(JSON.stringify({ 
+        message: input,
+        session_id: activeSessionId
+      }));
+      setInput("");
+    } catch (err) {
+      toast.error("Network Error");
+    }
+  };
+
+  const handleInterrupt = () => {
+    if (ws && isConnected) {
+      ws.send(JSON.stringify({ message: "/stop", session_id: activeSessionId }));
+      toast.info("Interrupt sent");
+    }
+  };
+
+  const clearCurrentSession = async () => {
+    if (!confirm("Clear all messages in this chat?")) return;
+    try {
+      await axios.delete(`${API_BASE}/sessions/${activeSessionId}/messages`);
+      setMessages([]);
+    } catch(e) {
+      toast.error("Failed to clear");
+    }
   };
 
   const handleKeyDown = (e) => {
@@ -56,103 +225,201 @@ export default function ChatInterface({ ws, isConnected }) {
   };
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      {/* 头部标题 */}
-      <div className="h-16 border-b border-border bg-white/50 backdrop-blur-sm flex items-center justify-between px-8 shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-          <span className="font-semibold text-slate-700">Interactive Session</span>
-        </div>
-        <button 
-          onClick={() => setMessages([])}
-          className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-          title="Clear History"
-        >
-          <Eraser size={18} />
-        </button>
-      </div>
-
-      {/* 消息区域 */}
-      <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6">
-        {messages.length === 0 && (
-          <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-6 opacity-60">
-            <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center">
-              <Command size={40} className="text-slate-300" />
-            </div>
-            <div className="text-center space-y-1">
-              <p className="text-lg font-medium text-slate-600">Resonance Host Ready</p>
-              <p className="text-sm">Awaiting commands or inquiries...</p>
-            </div>
-          </div>
-        )}
-        
-        {messages.map((m, i) => (
-          <div key={i} className={`flex gap-4 ${m.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
-            {/* 头像 */}
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border shadow-sm
-              ${m.role === 'user' ? 'bg-primary border-primary text-white' : 'bg-white border-slate-200 text-primary'}`}>
-              {m.role === 'user' ? <User size={16} /> : <Bot size={16} />}
-            </div>
-            
-            {/* 气泡 */}
-            <div className={`max-w-[80%] md:max-w-[70%] px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm
-              ${m.role === 'user' 
-                ? 'bg-primary text-white rounded-tr-none' 
-                : m.role === 'tool'
-                  ? 'bg-slate-50 border border-slate-200 text-slate-600 font-mono text-xs w-full'
-                  : 'bg-white border border-slate-100 text-slate-800 rounded-tl-none'
-              }`}>
-              {m.role === 'tool' ? (
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-blue-500 font-bold uppercase text-[10px] tracking-wider">
-                    <Play size={10} /> Tool Output: {m.name}
-                  </div>
-                  <div className="overflow-x-auto whitespace-pre-wrap break-all">{m.content}</div>
-                </div>
-              ) : (
-                <ReactMarkdown className="prose prose-sm max-w-none prose-slate">
-                  {m.content}
-                </ReactMarkdown>
-              )}
-            </div>
-          </div>
-        ))}
-        {isTyping && (
-          <div className="flex gap-4 animate-pulse">
-            <div className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center">
-              <Bot size={16} className="text-slate-400" />
-            </div>
-            <div className="bg-white border border-slate-100 px-4 py-3 rounded-2xl rounded-tl-none text-slate-400 text-sm">
-              Thinking...
-            </div>
-          </div>
-        )}
-        <div ref={scrollRef} />
-      </div>
-
-      {/* 输入框 */}
-      <div className="p-6 md:px-8 md:pb-8 bg-gradient-to-t from-background via-background to-transparent">
-        <div className="max-w-4xl mx-auto relative shadow-soft rounded-2xl bg-white border border-slate-200 focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all duration-300">
-          <textarea
-            autoFocus
-            rows={1}
-            className="w-full bg-transparent pl-6 pr-14 py-4 text-sm text-slate-800 placeholder-slate-400 focus:outline-none resize-none overflow-hidden max-h-40"
-            placeholder="Ask anything, or use /stop to interrupt..."
-            value={input}
-            onChange={e => {
-              setInput(e.target.value);
-              e.target.style.height = 'auto';
-              e.target.style.height = e.target.scrollHeight + 'px';
-            }}
-            onKeyDown={handleKeyDown}
-          />
+    <div className="flex h-full overflow-hidden bg-background">
+      
+      {/* --- 左侧会话列表 --- */}
+      <div className="w-64 border-r border-border bg-surface/50 flex flex-col shrink-0">
+        <div className="p-4 border-b border-border">
           <button 
-            onClick={sendMessage}
-            disabled={!input.trim()}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-primary text-white rounded-xl hover:bg-primary-hover disabled:opacity-50 disabled:hover:bg-primary transition shadow-md"
+            onClick={createSession}
+            className="w-full flex items-center justify-center gap-2 bg-white border border-border hover:border-primary text-slate-600 hover:text-primary py-2.5 rounded-lg transition-all shadow-sm font-medium text-sm"
           >
-            <Send size={18} />
+            <Plus size={16} /> New Chat
           </button>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {sessions.map(s => {
+            const isActive = s.id === activeSessionId;
+            const isEditing = editingSessionId === s.id;
+            const isMain = s.id === "resonance_main";
+
+            return (
+              <div 
+                key={s.id}
+                onClick={() => !isEditing && setActiveSessionId(s.id)}
+                className={`group flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-all border border-transparent
+                  ${isActive ? 'bg-white border-border shadow-sm' : 'hover:bg-white/50 text-slate-500'}
+                `}
+              >
+                <div className={`p-1.5 rounded-md ${isMain ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
+                  {isMain ? <Bot size={14} /> : <MessageSquare size={14} />}
+                </div>
+                
+                <div className="flex-1 min-w-0">
+                  {isEditing ? (
+                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                      <input 
+                        autoFocus
+                        className="w-full text-xs border rounded px-1 py-0.5"
+                        value={renameValue}
+                        onChange={e => setRenameValue(e.target.value)}
+                      />
+                      <button onClick={confirmRename} className="text-green-500"><Check size={12} /></button>
+                      <button onClick={() => setEditingSessionId(null)} className="text-red-500"><X size={12} /></button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className={`text-sm font-medium truncate ${isActive ? 'text-slate-800' : ''}`}>
+                        {isMain ? "Resonance Main" : s.id}
+                      </div>
+                      <div className="text-[10px] text-slate-400 truncate">
+                        {s.preview || "Empty conversation"}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* 操作按钮 (非主进程且非编辑状态) */}
+                {!isMain && !isEditing && (
+                  <div className="hidden group-hover:flex items-center gap-1">
+                    <button onClick={(e) => startRename(e, s)} className="p-1 hover:text-blue-500 text-slate-300">
+                      <Edit2 size={12} />
+                    </button>
+                    <button onClick={(e) => deleteSession(e, s.id)} className="p-1 hover:text-red-500 text-slate-300">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* --- 右侧聊天主窗口 --- */}
+      <div className="flex-1 flex flex-col min-w-0">
+        
+        {/* 头部状态栏 */}
+        <div className="h-16 border-b border-border bg-surface/80 backdrop-blur-md flex items-center justify-between px-8 shrink-0 z-10">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-slate-700 text-lg">
+              {activeSessionId === "resonance_main" ? "Resonance Main Process" : activeSessionId}
+            </span>
+            <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider 
+              ${isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+              {isConnected ? 'ONLINE' : 'OFFLINE'}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {isTyping && (
+              <button 
+                onClick={handleInterrupt}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors border border-red-100"
+              >
+                <StopCircle size={14} /> Stop
+              </button>
+            )}
+            <button 
+              onClick={clearCurrentSession}
+              className="p-2 text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+              title="Clear History"
+            >
+              <Eraser size={18} />
+            </button>
+          </div>
+        </div>
+
+        {/* 消息滚动区 */}
+        <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6">
+          {messages.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center text-text-secondary/40 space-y-6 opacity-60">
+              <div className="w-24 h-24 bg-surface rounded-3xl shadow-soft flex items-center justify-center border border-border">
+                <Command size={40} className="text-primary/40" />
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-bold text-text-primary/60 italic tracking-tight">System Ready</p>
+                <p className="text-sm">Session: {activeSessionId}</p>
+              </div>
+            </div>
+          )}
+          
+          {messages.map((m, i) => (
+            <div key={i} className={`flex gap-4 ${m.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in slide-in-from-bottom-3 duration-500`}>
+              {/* 头像 */}
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border shadow-sm
+                ${m.role === 'user' ? 'bg-primary border-primary text-white' : 'bg-surface border-border text-primary'}`}>
+                {m.role === 'user' ? <User size={18} /> : <Bot size={18} />}
+              </div>
+              
+              {/* 消息气泡 */}
+              <div className={`max-w-[85%] md:max-w-[75%] px-5 py-3.5 rounded-2xl text-[14.5px] leading-relaxed shadow-soft
+                ${m.role === 'user' 
+                  ? 'bg-primary text-white rounded-tr-none' 
+                  : m.role === 'tool'
+                    ? 'bg-slate-900 border border-slate-800 text-slate-300 font-mono text-xs w-full'
+                    : m.role === 'system'
+                      ? 'bg-amber-50 border border-amber-200 text-amber-800 w-full italic'
+                      : 'bg-surface border border-border text-text-primary rounded-tl-none'
+                }`}>
+                {m.role === 'tool' ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest border-b border-white/10 pb-1">
+                      <Play size={10} /> Tool Execution: {m.name}
+                    </div>
+                    <div className="overflow-x-auto whitespace-pre-wrap break-all opacity-90">{m.content}</div>
+                  </div>
+                ) : (
+                  <div className="prose prose-sm max-w-none prose-slate prose-headings:text-primary prose-a:text-blue-600 prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded prose-pre:bg-slate-900 prose-pre:text-slate-100">
+                    <ReactMarkdown>
+                    {m.content || ""}
+                  </ReactMarkdown>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          
+          {isTyping && (
+            <div className="flex gap-4 animate-pulse">
+              <div className="w-9 h-9 rounded-xl bg-surface border border-border flex items-center justify-center">
+                <Loader2 size={18} className="text-primary animate-spin" />
+              </div>
+              <div className="bg-surface border border-border px-5 py-3.5 rounded-2xl rounded-tl-none text-text-secondary text-sm shadow-soft">
+                AI is processing...
+              </div>
+            </div>
+          )}
+          <div ref={scrollRef} className="h-4" />
+        </div>
+
+        {/* 输入控制区 */}
+        <div className="p-6 md:px-10 md:pb-10 bg-gradient-to-t from-background via-background to-transparent z-10">
+          <div className="max-w-4xl mx-auto relative shadow-glow rounded-2xl bg-surface border border-border focus-within:ring-4 focus-within:ring-primary/10 focus-within:border-primary transition-all duration-500">
+            <textarea
+              autoFocus
+              rows={1}
+              className="w-full bg-transparent pl-6 pr-16 py-4 text-[15px] text-text-primary placeholder-text-secondary/50 focus:outline-none resize-none overflow-hidden max-h-48"
+              placeholder={`Message ${activeSessionId}...`}
+              value={input}
+              onChange={e => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = e.target.scrollHeight + 'px';
+              }}
+              onKeyDown={handleKeyDown}
+            />
+            <button 
+              onClick={sendMessage}
+              disabled={!input.trim() || !isConnected}
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-primary text-white rounded-xl hover:bg-primary-hover disabled:opacity-30 disabled:grayscale transition-all shadow-lg active:scale-95"
+            >
+              <Send size={20} />
+            </button>
+          </div>
+          <p className="text-center text-[10px] text-text-secondary mt-4 uppercase tracking-tighter opacity-50">
+            Resonance v2.0 • Multi-Session AI Host • System Integrated
+          </p>
         </div>
       </div>
     </div>

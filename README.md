@@ -7,7 +7,7 @@
 ![React](https://img.shields.io/badge/Frontend-React_19-61DAFB?logo=react)
 ![Tailwind](https://img.shields.io/badge/CSS-Tailwind_v4-38B2AC?logo=tailwindcss)
 ![Vite](https://img.shields.io/badge/Build-Vite_6-646CFF?logo=vite)
-
+![alt text](docs/image.png)
 ---
 
 ## 🌟 核心特性

@@ -13,8 +13,10 @@ from core.rag_store import RAGStore
 from core.sentinel_engine import SentinelEngine
 
 class HostAgent:
-    def __init__(self, session_id="default", config_path="config/config.yaml"):
-        self.session_id = session_id
+    def __init__(self, default_session="resonance_main", config_path="config/config.yaml"):
+        # [修改点] 默认会话ID
+        self.default_session_id = default_session
+        self.active_session_id = default_session
         
         # 路径定义
         self.config_path = config_path
@@ -27,10 +29,8 @@ class HostAgent:
         # 加载所有配置
         self.load_all_configs()
         
-        # 初始化组件
-        # 从 Config 读取 window_size，默认为 10
-        win_size = self.config.get('system', {}).get('memory', {}).get('window_size', 10)
-        self.memory = ConversationMemory(session_id=self.session_id, window_size=win_size)
+        # [修改点] 内存管理器缓存 {session_id: ConversationMemory Object}
+        self.memory_cache = {}
         
         # 初始化向量数据库 (RAG)
         vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
@@ -46,8 +46,18 @@ class HostAgent:
         # 初始化 LLM 客户端
         self._init_client()
 
-    # ... (中间原有代码保持不变，包括 load_all_configs, _init_client, _build_dynamic_system_prompt 等) ...
-    # ... (直到 _update_summary_if_needed, _extract_and_save_memory_async 等方法，全部保留) ...
+    def get_memory(self, session_id=None) -> ConversationMemory:
+        """[新增] 获取指定会话的内存对象，如果不存在则创建并缓存"""
+        sid = session_id or self.active_session_id
+        if sid not in self.memory_cache:
+            win_size = self.config.get('system', {}).get('memory', {}).get('window_size', 10)
+            self.memory_cache[sid] = ConversationMemory(session_id=sid, window_size=win_size)
+        return self.memory_cache[sid]
+
+    # [新增] 为了兼容旧代码引用 self.memory 的地方，使用 property 代理当前活动会话
+    @property
+    def memory(self):
+        return self.get_memory(self.active_session_id)
 
     def load_all_configs(self):
         """加载系统配置、模型配置和用户画像"""
@@ -119,8 +129,8 @@ Core Principles:
             user_section += f"- {k}: {v}\n"
         if known_projects:
             user_section += "- Known Projects/Paths:\n"
-            for proj, path in known_projects.items():
-                user_section += f"  * {proj}: {path}\n"
+        for proj, path in known_projects.items():
+            user_section += f"  * {proj}: {path}\n"
 
         # 3. 长期记忆注入 (RAG Results)
         rag_section = ""
@@ -131,6 +141,7 @@ Core Principles:
             rag_section += "(Use these memories to answer contextually if applicable)\n"
 
         # 4. 对话摘要注入 (Summary)
+        # [修改点] 使用当前活动会话的摘要
         summary_text = self.memory.load_summary()
         summary_section = ""
         if summary_text:
@@ -229,7 +240,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     text=extracted_info,
                     metadata={
                         "type": "conversation_insight",
-                        "session": self.session_id,
+                        "session": self.active_session_id,
                         "original_user_input": turn_events_log[:50] # 方便追溯
                     }
                 )
@@ -248,19 +259,39 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
         print("[System]: Interrupt signal received.")
         self.stop_flag = True
 
-    def chat(self, user_input):
+    # [新增] 处理哨兵触发的事件，将其注入到主进程内存中
+    def handle_sentinel_trigger(self, message):
+        """
+        当哨兵触发时调用。
+        将消息作为 'system' 或 'tool' 结果写入 'resonance_main' 会话。
+        """
+        try:
+            main_mem = self.get_memory("resonance_main")
+            # 加上时间戳
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            formatted_msg = f"[Sentinel Alert {timestamp}]: {message}"
+            main_mem.add_system_message(formatted_msg)
+            print(f"[Core] Injected sentinel alert into 'resonance_main' session.")
+        except Exception as e:
+            print(f"[Core Error] Failed to inject sentinel memory: {e}")
+
+    def chat(self, user_input, session_id="default"):
         """
         主交互逻辑 (Generator):
         Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
         """
+        # [修改点] 切换上下文
+        self.active_session_id = session_id
+        
         # [修改点] 重置打断标志
         self.stop_flag = False
         
         try:
             # 记录初始用户消息
             self.memory.add_user_message(user_input)
-            # 2. 准备工具和检索
-            top_k = self.config['system'].get('memory', {}).get('retrieve_top_k', 3)
+            
+            # 2. 检索长期记忆
+            top_k = self.config.get('system', {}).get('memory', {}).get('retrieve_top_k', 3)
             relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k)
             
             # 构建动态 System Prompt
@@ -322,9 +353,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
                         delta = chunk.choices[0].delta
                         
-                        if delta.content:
-                            full_response_content += delta.content
-                            yield {"type": "delta", "content": delta.content}
+                        # [重要修复] 严格检查 content 且仅在有内容时 yield
+                        if hasattr(delta, 'content') and delta.content is not None:
+                            content_chunk = delta.content
+                            full_response_content += content_chunk
+                            yield {"type": "delta", "content": content_chunk}
                         
                         if delta.tool_calls:
                             for tc_chunk in delta.tool_calls:
@@ -338,7 +371,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                                 if tc_chunk.function.arguments:
                                     tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
                 except Exception as e:
-                    yield {"type": "error", "content": f"Stream error: {str(e)}"}
+                    yield {"type": "error", "content": f"Stream context error: {str(e)}"}
                     break
                 
                 # 如果是被打断跳出 for loop 的，这里 full_response_content 可能只有一半
@@ -391,7 +424,9 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                         yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
                         break
 
-                    func_name = tc.function.name
+                    # [修复点] 获取工具函数名，防止下文 func_name 未定义引用
+                    func_name = tc.function.name 
+                    
                     try:
                         args = json.loads(tc.function.arguments)
                     except:

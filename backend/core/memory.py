@@ -14,10 +14,12 @@ class ConversationMemory:
     2. 滑动窗口 (Sliding Window)：用于 LLM 上下文，只返回最近 N 轮。
     3. 摘要 (Summary)：存储历史对话的总结。
     4. [新增] 上下文自愈：防止因工具调用中断导致的 API 格式错误。
+    5. [新增] 多会话管理能力：支持重命名、删除特定消息。
     """
     def __init__(self, session_id="default", base_dir="logs/sessions", window_size=10):
         self.session_id = session_id
         self.base_dir = base_dir
+        # [修改点] 确保目录路径规范化
         self.save_path = os.path.join(self.base_dir, f"{self.session_id}.json")
         self.summary_path = os.path.join(self.base_dir, f"{self.session_id}_summary.txt")
         
@@ -76,6 +78,10 @@ class ConversationMemory:
         """内部方法：追加消息并保存"""
         history = self._read_full_log()
         message['timestamp'] = time.time()
+        # [新增] 为每条消息生成唯一ID，方便前端删除或修改
+        if 'id' not in message:
+            message['id'] = str(int(time.time() * 1000))
+            
         history.append(message)
         self._write_full_log(history)
 
@@ -85,6 +91,14 @@ class ConversationMemory:
     def add_ai_message(self, content):
         if content: # 避免保存空内容
             self._append_message({"role": "assistant", "content": content})
+            
+    # [新增] 添加系统/哨兵消息
+    def add_system_message(self, content):
+        """用于哨兵系统或系统通知"""
+        # 注意：OpenAI API 通常 system message 只在开头。
+        # 这里为了保持线性历史，我们将其作为 system 角色插入，
+        # 在 _sanitize_context 中可能需要根据模型特性决定是否保留或转为 user/assistant
+        self._append_message({"role": "system", "content": content})
 
     def add_ai_tool_call(self, content, tool_calls):
         """保存 AI 发起的工具调用请求"""
@@ -243,22 +257,80 @@ class ConversationMemory:
         if os.path.exists(self.summary_path):
             os.remove(self.summary_path)
 
+    # --- [新增] 会话管理 API 支持 ---
+
+    def rename_session(self, new_name: str):
+        """重命名当前会话文件"""
+        new_path = os.path.join(self.base_dir, f"{new_name}.json")
+        new_summary_path = os.path.join(self.base_dir, f"{new_name}_summary.txt")
+        
+        if os.path.exists(new_path):
+            raise ValueError(f"Session '{new_name}' already exists.")
+            
+        if os.path.exists(self.save_path):
+            os.rename(self.save_path, new_path)
+            self.save_path = new_path
+            
+        if os.path.exists(self.summary_path):
+            os.rename(self.summary_path, new_summary_path)
+            self.summary_path = new_summary_path
+            
+        self.session_id = new_name
+        return True
+
+    def delete_message(self, message_index: int):
+        """删除特定索引的消息（危险操作：可能破坏上下文）"""
+        history = self._read_full_log()
+        if 0 <= message_index < len(history):
+            history.pop(message_index)
+            self._write_full_log(history)
+            return True
+        return False
+
     @staticmethod
     def list_sessions(base_dir="logs/sessions"):
-        """列出所有现有会话"""
+        """列出所有现有会话，包括元数据"""
         if not os.path.exists(base_dir):
             return []
         files = glob.glob(os.path.join(base_dir, "*.json"))
-        # 返回文件名作为 session_id (去掉 .json)
-        sessions = [os.path.basename(f).replace(".json", "") for f in files]
+        sessions = []
+        for f in files:
+            try:
+                name = os.path.basename(f).replace(".json", "")
+                mtime = os.path.getmtime(f)
+                # 简单读取最后一条消息作为预览
+                with open(f, 'r', encoding='utf-8') as read_f:
+                    data = json.load(read_f)
+                    preview = ""
+                    if data:
+                        last_msg = data[-1]
+                        preview = str(last_msg.get('content', ''))[:50]
+                        if not preview and last_msg.get('tool_calls'):
+                            preview = f"[Tool Call: {last_msg['tool_calls'][0]['function']['name']}]"
+                
+                sessions.append({
+                    "id": name,
+                    "updated_at": mtime,
+                    "preview": preview,
+                    "message_count": len(data) if data else 0
+                })
+            except Exception:
+                continue
+                
         # 按修改时间排序（新的在前）
-        sessions.sort(key=lambda x: os.path.getmtime(os.path.join(base_dir, f"{x}.json")), reverse=True)
+        sessions.sort(key=lambda x: x['updated_at'], reverse=True)
         return sessions
 
     @staticmethod
     def delete_session(session_id, base_dir="logs/sessions"):
         path = os.path.join(base_dir, f"{session_id}.json")
+        summary_path = os.path.join(base_dir, f"{session_id}_summary.txt")
+        
+        deleted = False
         if os.path.exists(path):
             os.remove(path)
-            return True
-        return False
+            deleted = True
+        if os.path.exists(summary_path):
+            os.remove(summary_path)
+            
+        return deleted

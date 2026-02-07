@@ -6,9 +6,6 @@ import sys
 import subprocess
 import time
 import json
-import glob
-from openai import OpenAI
-# [修改点] 引入 WebEngine
 from core.functools.web_engine import WebEngine
 
 class Toolbox:
@@ -24,20 +21,19 @@ class Toolbox:
     def get_tool_definitions(self):
         """
         获取传递给 LLM 的 tools 定义 (JSON Schema)
+        [优化] 为每个工具增加了详细的用法指导和 Context，特别是哨兵系统。
         """
         # 动态获取当前可用脚本以生成描述
         available_scripts = self.agent.config.get('scripts', {})
         scripts_desc = ", ".join([f"'{k}' ({v.get('description', '')})" for k, v in available_scripts.items()])
 
         return [
-            # -----------------------------------------------------------
-            # [新增工具] 联网能力
-            # -----------------------------------------------------------
+            # --- 核心能力 ---
             {
                 "type": "function",
                 "function": {
                     "name": "internet_search",
-                    "description": "Search the internet using DuckDuckGo to find real-time information, news, or technical solutions.",
+                    "description": "Perform a real-time internet search using DuckDuckGo. Use this when you need current events, news, documentation, or solutions to technical errors that are not in your memory.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -72,8 +68,8 @@ class Toolbox:
             {
                 "type": "function",
                 "function": {
-                    "name": "invoke_skill", 
-                    "description": f"Execute a specific pre-configured 'Skill' (automation script). Available skills: {scripts_desc}",
+                    "name": "invoke_skill",
+                    "description": f"Execute a pre-registered automation skill (script). PRIORITIZE this over raw shell commands if a matching skill exists. Available skills: {scripts_desc}",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -235,13 +231,13 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "add_time_sentinel",
-                    "description": "Set a timer to wake you up to perform a task. Useful for periodic checks or delayed reminders.",
+                    "description": "Set a delayed trigger (Timer). Use this when the user says 'Remind me in 10 mins' or 'Check the download later'. When the time is up, the system will wake up and notify the user.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "interval": {"type": "integer", "description": "Number of units (e.g. 5)."},
-                            "unit": {"type": "string", "enum": ["seconds", "minutes", "hours", "days"], "description": "Time unit."},
-                            "description": {"type": "string", "description": "What you should do when this timer triggers."}
+                            "interval": {"type": "integer", "description": "Numeric value (e.g. 30)."},
+                            "unit": {"type": "string", "enum": ["seconds", "minutes", "hours", "days"]},
+                            "description": {"type": "string", "description": "The message/task to execute when time is up."}
                         },
                         "required": ["interval", "unit", "description"]
                     }
@@ -251,12 +247,12 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "add_file_sentinel",
-                    "description": "Watch a file or folder. If it changes/modifies, you will be woken up.",
+                    "description": "Monitor a specific file or folder for ANY changes (modify/delete/create). Use this when the user says 'Watch this file' or 'Tell me when the log updates'. Alerts represent real-time feedback.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Absolute path to the file or folder to watch."},
-                            "description": {"type": "string", "description": "Reason for watching this file."}
+                            "path": {"type": "string", "description": "Absolute Windows path to watch."},
+                            "description": {"type": "string", "description": "Reason for watching (e.g. 'Alert if build log updates')."}
                         },
                         "required": ["path", "description"]
                     }

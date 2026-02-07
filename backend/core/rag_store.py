@@ -138,6 +138,18 @@ class RAGStore:
             # print(f"[Warning] Failed to update memory stats: {e}")
             pass
 
+    # [新增] 删除记忆功能，供前端管理使用
+    def delete_memory(self, memory_id):
+        """根据 ID 删除特定记忆"""
+        if not self.collection:
+            return False
+        try:
+            self.collection.delete(ids=[memory_id])
+            return True
+        except Exception as e:
+            print(f"[Error] Failed to delete memory {memory_id}: {e}")
+            return False
+
     def get_all_memories_as_df(self):
         """[新增] 导出所有记忆为 Pandas DataFrame，用于可视化分析"""
         if not self.collection:

@@ -13,3 +13,4 @@ duckduckgo-search>=5.0.0
 lxml
 schedule
 keyboard
+fastapi==0.128.3

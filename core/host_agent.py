@@ -9,6 +9,8 @@ from core.memory import ConversationMemory
 # [修改点] 导入解耦后的工具箱
 from core.functools.tools import Toolbox
 from core.rag_store import RAGStore
+# [修改点] 导入 SentinelEngine
+from core.sentinel_engine import SentinelEngine
 
 class HostAgent:
     def __init__(self, session_id="default", config_path="config/config.yaml"):
@@ -33,12 +35,19 @@ class HostAgent:
         # 初始化向量数据库 (RAG)
         vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
         self.rag_store = RAGStore(persistence_path=vec_path)
+
+        # [新增] 初始化哨兵引擎
+        # 注意：这里只初始化，start() 由 main.py 或外部显式调用，防止在非交互环境下(如测试)意外启动
+        self.sentinel_engine = SentinelEngine()
         
         # 初始化工具箱
         self.toolbox = Toolbox(self)
         
         # 初始化 LLM 客户端
         self._init_client()
+
+    # ... (中间原有代码保持不变，包括 load_all_configs, _init_client, _build_dynamic_system_prompt 等) ...
+    # ... (直到 _update_summary_if_needed, _extract_and_save_memory_async 等方法，全部保留) ...
 
     def load_all_configs(self):
         """加载系统配置、模型配置和用户画像"""
@@ -98,6 +107,7 @@ Core Principles:
 3. **Multi-Step Tool Use.** You can use multiple tools or use tools multiple times in a sequence to complete a task. Analyze the output of each tool before proceeding.
 4. **Robustness.** If a command fails, analyze the error and try a different approach.
 5. **Memory.** You have access to long-term memory. Use it to recall user preferences and past projects.
+6. **Autonomy (Sentinels).** You have a 'Sentinel System'. You can set triggers of Time, File, Behavior to wake yourself up later. Use this to be proactive.
 """
         
         # 2. 用户画像注入
@@ -185,8 +195,6 @@ Core Principles:
         避免将垃圾对话（"你好", "嗯"）存入。
         """
         try:
-
-
             # 调用 LLM 进行信息萃取 (Extraction)
             # 使用更便宜的模型或相同的模型，Prompt 侧重于"事实提取"
             extraction_prompt = f"""
@@ -267,7 +275,6 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             tools = self.toolbox.get_tool_definitions()
 
             
-
             # 4. 进入 ReAct 循环
             # 用于萃取的全量日志记录（本轮对话）
             turn_log_for_extraction = f"User Input: {user_input}\n"
@@ -470,6 +477,28 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             
             elif function_name == "browse_website":
                 return self.toolbox.run_browse_website(args.get("url"))
+
+            # [新增] 哨兵系统工具路由
+            elif function_name == "add_time_sentinel":
+                return self.toolbox.add_time_sentinel(
+                    interval=args.get("interval"),
+                    unit=args.get("unit"),
+                    description=args.get("description")
+                )
+            elif function_name == "add_file_sentinel":
+                return self.toolbox.add_file_sentinel(
+                    path=args.get("path"),
+                    description=args.get("description")
+                )
+            elif function_name == "add_behavior_sentinel":
+                return self.toolbox.add_behavior_sentinel(
+                    key_combo=args.get("key_combo"),
+                    description=args.get("description")
+                )
+            elif function_name == "list_active_sentinels":
+                return self.toolbox.list_sentinels()
+            elif function_name == "remove_sentinel":
+                return self.toolbox.remove_sentinel(args.get("type"), args.get("id"))
 
             else:
                 return f"Error: Unknown tool '{function_name}'"

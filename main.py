@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk
 import argparse
 import subprocess
+from win11toast import toast
 
 # === 新增：抢占式初始化 ONNX ===
 try:
@@ -17,8 +18,6 @@ except Exception:
     pass
 # ============================
 
-import subprocess
-import argparse
 from core.host_agent import HostAgent
 
 class ResonanceHUD:
@@ -65,6 +64,7 @@ class ResonanceHUD:
         self.txt_display.tag_config("tool", foreground="#d08770", font=("Consolas", 10))
         self.txt_display.tag_config("error", foreground="#bf616a")
         self.txt_display.tag_config("status", foreground="#5e81ac", font=("Consolas", 9, "italic"))
+        self.txt_display.tag_config("sentinel", foreground="#ebcb8b", font=("Segoe UI", 11, "bold")) # 哨兵消息颜色
 
         # 3. 底部输入区
         input_frame = tk.Frame(self.root, bg="#1e1e1e")
@@ -85,15 +85,19 @@ class ResonanceHUD:
         # --- 逻辑控制 ---
         self.msg_queue = queue.Queue()
         self.is_generating = False
+
+        # [新增] 注册哨兵回调
+        # 当哨兵引擎触发时，会调用这个 lambda，将消息放入队列
+        self.agent.sentinel_engine.set_callback(lambda msg: self.msg_queue.put({"type": "sentinel_trigger", "content": msg}))
+        
+        # 启动队列监听器
+        self.root.after(100, self.process_queue)
         
         # 初始 Query 处理
         if initial_query:
             self.entry_input.insert(0, initial_query)
             self.on_send() # 自动发送
             
-        # 启动队列监听器
-        self.root.after(100, self.process_queue)
-        
     def append_text(self, text, tag=None):
         """线程安全的文本追加"""
         self.txt_display.config(state="normal")
@@ -126,6 +130,31 @@ class ResonanceHUD:
                     self.append_text(f"\n👤 You: {content}\n", "user")
                     self.append_text("💠 Resonance: ", "ai") # 前缀
                 
+                # [新增] 哨兵触发事件处理
+                elif m_type == "sentinel_trigger":
+                    if not self.is_generating:
+                        # 自动在 UI 上显示触发信息
+                        self.append_text(f"\n🔔 {content}\n", "sentinel")
+                        # 强制弹出窗口
+                        self.root.deiconify() 
+                        self.root.attributes("-topmost", True)
+                        
+                        # 自动开始生成 (Auto-Run)
+                        self.is_generating = True
+                        self.btn_send.config(text="Stop", bg="#bf616a")
+                        
+                        # 构造 Prompt 让 AI 知道是哨兵唤醒了它
+                        prompt = f"SYSTEM ALERT: {content}\nPlease analyze this event and take necessary actions."
+                        
+                        # 启动线程
+                        t = threading.Thread(target=self.run_agent_task, args=(prompt,), daemon=True)
+                        t.start()
+                        
+                    else:
+                        # 如果正在忙，只提示
+                        toast("Resonance Sentinel Triggered", content)
+                        self.append_text(f"\n[Queue] Sentinel Triggered: {content}\n", "status")
+
                 elif m_type == "done":
                     self.is_generating = False
                     self.status_var.set("Ready")
@@ -139,8 +168,12 @@ class ResonanceHUD:
     def run_agent_task(self, query):
         """后台线程运行 Agent"""
         try:
-            # 传递用户消息到 UI
-            self.msg_queue.put({"type": "user", "content": query})
+            # 传递用户消息到 UI (如果是 Sentinel 触发的，已经在 process_queue 里打印了)
+            if not query.startswith("SYSTEM ALERT"):
+                self.msg_queue.put({"type": "user", "content": query})
+            else:
+                self.msg_queue.put({"type": "user", "content": "[SYSTEM EVENT TRIGGERED]"})
+                self.msg_queue.put({"type": "delta", "content": "Checking Sentinel Report...\n"})
             
             for event in self.agent.chat(query):
                 self.msg_queue.put(event)
@@ -180,6 +213,8 @@ class ResonanceHUD:
         t.start()
 
     def start(self):
+        # [新增] 启动哨兵引擎
+        self.agent.sentinel_engine.start()
         self.root.mainloop()
 
 def check_env():

@@ -1,6 +1,3 @@
-# ========================
-# 1. 核心安全 (绝对不能漏)
-# ========================
 # 包含 API Key 的文件
 config/profiles.yaml
 # 包含用户路径和隐私习惯的文件
@@ -12,11 +9,11 @@ config/config.yaml
 *.bak
 
 # ========================
-# 2. 运行时产物 (防止垃圾提交)
+# 2运行时产物 防止垃圾提交
 # ========================
 # 你的代码生成的日志文件夹
 logs/
-# 你的代码可能生成的截图 (WebEngine/Selenium截图)
+# 代码可能生成的截图
 *.png
 *.jpg
 *.jpeg
@@ -66,3 +63,4 @@ Thumbs.db
 # 如果这些是你不想上传的临时工具，可以保留
 DirLister.py
 directory_listing_with_content.txt
+config/sentinels.json

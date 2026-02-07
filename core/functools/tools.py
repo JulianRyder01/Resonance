@@ -227,6 +227,82 @@ class Toolbox:
                     }
                 }
             },
+
+            # ---------------------------------------------------------------------
+            # [新增工具] 哨兵系统 (Sentinel System)
+            # ---------------------------------------------------------------------
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_time_sentinel",
+                    "description": "Set a timer to wake you up to perform a task. Useful for periodic checks or delayed reminders.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "interval": {"type": "integer", "description": "Number of units (e.g. 5)."},
+                            "unit": {"type": "string", "enum": ["seconds", "minutes", "hours", "days"], "description": "Time unit."},
+                            "description": {"type": "string", "description": "What you should do when this timer triggers."}
+                        },
+                        "required": ["interval", "unit", "description"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_file_sentinel",
+                    "description": "Watch a file or folder. If it changes/modifies, you will be woken up.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Absolute path to the file or folder to watch."},
+                            "description": {"type": "string", "description": "Reason for watching this file."}
+                        },
+                        "required": ["path", "description"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_behavior_sentinel",
+                    "description": "Register a global hotkey (keyboard shortcut). When pressed by the user, you will be woken up to perform an action.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key_combo": {"type": "string", "description": "Key combination (e.g. 'ctrl+shift+a', 'f9')."},
+                            "description": {"type": "string", "description": "What to do when this key is pressed."}
+                        },
+                        "required": ["key_combo", "description"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_active_sentinels",
+                    "description": "List all currently active Sentinels (Time, File, Behavior).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "remove_sentinel",
+                    "description": "Stop and remove a specific sentinel.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["time", "file", "behavior"]},
+                            "id": {"type": "string", "description": "The Sentinel ID found in 'list_active_sentinels'."}
+                        },
+                        "required": ["type", "id"]
+                    }
+                }
+            }
         ]
 
     # --- 具体实现 ---
@@ -581,3 +657,26 @@ class Toolbox:
             return f"Error browsing page: {data['error']}"
         
         return f"Title: {data['title']}\nURL: {data['url']}\n\n[Page Content]:\n{data['content']}"
+
+    # --- 哨兵系统方法 ---
+    def add_time_sentinel(self, interval, unit, description):
+        s_id = self.agent.sentinel_engine.add_time_sentinel(interval, unit, description)
+        return f"✅ Time Sentinel Set! (ID: {s_id})\nI will trigger every {interval} {unit} to: {description}"
+
+    def add_file_sentinel(self, path, description):
+        s_id = self.agent.sentinel_engine.add_file_sentinel(path, description)
+        if "Error" in str(s_id): return s_id
+        return f"✅ File Sentinel Set! (ID: {s_id})\nWatching: {path}\nReason: {description}"
+
+    def add_behavior_sentinel(self, key_combo, description):
+        s_id = self.agent.sentinel_engine.add_behavior_sentinel(key_combo, description)
+        return f"✅ Behavior Sentinel Set! (ID: {s_id})\nHotkey: {key_combo}\nAction: {description}"
+
+    def list_sentinels(self):
+        data = self.agent.sentinel_engine.list_sentinels()
+        return json.dumps(data, indent=2, ensure_ascii=False)
+
+    def remove_sentinel(self, s_type, s_id):
+        if self.agent.sentinel_engine.remove_sentinel(s_type, s_id):
+            return f"Sentinel {s_id} removed."
+        return "Error: Sentinel not found."

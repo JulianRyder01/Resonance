@@ -133,6 +133,12 @@ export default function ChatInterface({ ws, isConnected }) {
     const handleMsg = (e) => {
       try {
         const data = JSON.parse(e.data);
+      
+      // [关键点] 检查消息是否属于当前打开的会话
+      if (data.session_id && data.session_id !== activeSessionId) {
+        // 如果是其他会话的消息，可以保持静默或在侧边栏显示红点
+        return; 
+      }
         
         if (data.type === 'delta') {
           const deltaContent = data.content ?? ""; 

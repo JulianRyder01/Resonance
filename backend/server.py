@@ -4,6 +4,7 @@ import sys
 import json
 import asyncio
 import logging
+import threading
 from typing import Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,11 +40,17 @@ class GlobalState:
     def __init__(self):
         # [修改点] 默认主会话
         self.agent = HostAgent(default_session="resonance_main")
-        self.agent.sentinel_engine.start() # 启动哨兵线程
+        self.agent.sentinel_engine.start() 
+        # [修改点] 增加 loop 引用，用于跨线程通信
+        self.loop = None 
         logger.info("HostAgent & SentinelEngine Started.")
 
 state = GlobalState()
-
+# [修改点] 在 FastAPI 启动时捕获主事件循环
+@app.on_event("startup")
+async def startup_event():
+    state.loop = asyncio.get_running_loop()
+    logger.info("Main Event Loop captured for thread-safe bridging.")
 # --- Pydantic Models for Config API ---
 class ProfileUpdate(BaseModel):
     profile_id: str
@@ -71,18 +78,23 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info(f"New WS Client connected. Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info("WS Client disconnected.")
 
     async def broadcast(self, message: dict):
         """向所有连接的前端广播消息"""
+        if not self.active_connections:
+            return
         text = json.dumps(message, ensure_ascii=False)
         for connection in self.active_connections:
             try:
                 await connection.send_text(text)
             except Exception as e:
-                logger.error(f"WS Send Error: {e}")
+                logger.error(f"WS Broadcast Error: {e}")
 
 manager = ConnectionManager()
 
@@ -95,64 +107,68 @@ async def run_autonomous_reaction(trigger_message: str):
     结果会实时流式传输到 WebSocket，最后通过 Toast 弹窗通知。
     """
     session_id = "resonance_main"
-    logger.info(f"[Auto-Reaction] Started for: {trigger_message}")
+    logger.info(f"[Auto-Reaction] AI triggered by sentinel: {trigger_message}")
 
-    # 1. 构造触发提示词
-    # 我们告诉 AI 刚刚发生了系统警报，要求它分析
-    prompt = f"[System Sentinel Triggered]: {trigger_message}\nPlease analyze this event. If it requires action (like checking a file, looking up info), DO IT. Finally, verify if everything is OK."
-    
-    full_response_text = ""
-    
-    # 2. 通知前端 AI 开始工作了
+    # 1. 等待 WebSocket 连接稳定（防止触发瞬间连接还没握手完成）
+    await asyncio.sleep(0.5)
+
+    # 2. 发送初始状态通知
     await manager.broadcast({
-        "type": "system_status", 
-        "content": "🛡️ Sentinel Active: AI Host is responding...",
+        "type": "sentinel_alert", # 前端会触发 Toast
+        "content": f" Sentinel triggered. AI is responding to: {trigger_message}",
         "session_id": session_id
     })
 
-    try:
-        # 3. 运行 Agent 推理循环 (模拟用户输入)
-        # 注意：Agent.chat 是同步生成器，我们需要在循环中释放控制权给 asyncio loop
-        iterator = state.agent.chat(prompt, session_id=session_id)
-        
-        for event in iterator:
-            # 广播事件到前端（带上 session_id，让前端知道这是主进程的消息）
-            event["session_id"] = session_id
-            await manager.broadcast(event)
-            
-            # 收集最终文本用于 Toast 通知
-            if event["type"] == "delta":
-                full_response_text += event.get("content", "")
-            
-            # [关键] 让出控制权，防止阻塞 WebSocket 心跳
-            await asyncio.sleep(0.01)
-            
-        # 4. 结束信号
-        await manager.broadcast({"type": "done", "session_id": session_id})
-        
-        # 5. 发送 Windows Toast 通知
-        if full_response_text.strip():
-            # 简单清洗 Markdown 符号以便在通知中显示
-            clean_text = full_response_text.replace("**", "").replace("##", "").strip()
-            # 截断过长内容
-            display_text = clean_text[:150] + "..." if len(clean_text) > 150 else clean_text
-            
-            toast(
-                "Resonance AI",
-                display_text,
-                duration="long", # 保持较长时间
-                # on_click=... (如果需要可以加打开浏览器的回调)
-            )
-            logger.info(f"[Auto-Reaction] Completed. Notification sent.")
+    # 3. 构造 Prompt 注入
+    prompt = f"[System Alert]: {trigger_message}. Please check this and take necessary actions."
+    
+    full_response_text = ""
 
-    except Exception as e:
-        logger.error(f"[Auto-Reaction] Error: {e}")
-        await manager.broadcast({
-            "type": "error", 
-            "content": f"Auto-reaction failed: {str(e)}",
-            "session_id": session_id
-        })
+    # [修改点] 定义一个包装器，将同步生成器转为异步队列，防止阻塞 Event Loop
+    def run_agent_chat(msg, sid, queue, loop):
+        try:
+            for event in state.agent.chat(msg, session_id=sid):
+                asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "done"}), loop)
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "error", "content": str(e)}), loop)
 
+    event_queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    
+    # 启动推理线程
+    threading.Thread(
+        target=run_agent_chat, 
+        args=(prompt, session_id, event_queue, loop),
+        daemon=True
+    ).start()
+
+    # 4. 消费队列并广播
+    while True:
+        event = await event_queue.get()
+        event["session_id"] = session_id
+        
+        # 实时推送
+        await manager.broadcast(event)
+        
+        if event["type"] == "delta":
+            full_response_text += (event.get("content") or "")
+        elif event["type"] == "done":
+            break
+        elif event["type"] == "error":
+            logger.error(f"Auto-reaction AI error: {event['content']}")
+            break
+
+    # 5. 发送 Windows Toast 弹窗
+    if full_response_text.strip():
+        # 清洗文本
+        clean_text = full_response_text.replace("*", "").replace("#", "")
+        display_text = clean_text[:120] + "..." if len(clean_text) > 120 else clean_text
+        
+        try:
+            toast("Resonance AI (Sentinel Response)", display_text)
+        except Exception as e:
+            logger.error(f"Windows Toast Error: {e}")
 
 # --- 哨兵回调桥接 ---
 # 这是一个运行在 Thread 中的回调，需要安全地调用 Async 方法
@@ -162,26 +178,16 @@ def sentinel_callback_bridge(message_str):
     1. 通知前端 (Toast)
     2. [新增] 将事件写入主进程会话，实现对话连贯
     """
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    if loop.is_running():
-        # A. 写入主进程内存 (记录日志)
-        state.agent.handle_sentinel_trigger(message_str)
+    if state.loop is None:
+        logger.error("Sentinel Error: Main Loop not initialized yet.")
+        return
 
-        # B. 广播到前端 (Toast Alert)
-        payload = {
-            "type": "sentinel_alert",
-            "content": message_str,
-            "timestamp": int(asyncio.get_event_loop().time())
-        }
-        asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
-        
-        # C. [新增] 启动 AI 自主响应闭环
-        asyncio.run_coroutine_threadsafe(run_autonomous_reaction(message_str), loop)
+    # A. 写入主进程内存
+    state.agent.handle_sentinel_trigger(message_str)
+
+    # B. [核心修复] 使用 run_coroutine_threadsafe 跨线程调用异步函数
+    logger.info(f"Sentinel Bridge: Scheduling auto-reaction for: {message_str}")
+    asyncio.run_coroutine_threadsafe(run_autonomous_reaction(message_str), state.loop)
 
 # 注册回调
 state.agent.sentinel_engine.set_callback(sentinel_callback_bridge)

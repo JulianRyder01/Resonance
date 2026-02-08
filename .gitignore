@@ -68,3 +68,5 @@ backend/config/sentinels.json
 backend/config/profiles.yaml
 backend/config/config.yaml
 backend/config/user_profile.yaml
+start_resonance.bat
+start_resonance.py

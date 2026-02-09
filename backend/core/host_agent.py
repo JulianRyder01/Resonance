@@ -18,33 +18,45 @@ class HostAgent:
         self.default_session_id = default_session
         self.active_session_id = default_session
         
-        # 路径定义
-        self.config_path = config_path
-        self.profiles_path = "config/profiles.yaml"
-        self.user_profile_path = "config/user_profile.yaml"
+        # --- [关键修改开始] 路径锚定修复 ---
+        # 获取当前 host_agent.py 的绝对路径: .../backend/core/host_agent.py
+        current_file_path = os.path.abspath(__file__)
+        # 获取 backend 目录: .../backend
+        backend_root = os.path.dirname(os.path.dirname(current_file_path))
         
-        # [新增] 打断控制标志
-        self.stop_flag = False
+        # 强制将 config 路径锚定到 backend 目录
+        self.config_path = os.path.join(backend_root, config_path)
+        self.profiles_path = os.path.join(backend_root, "config/profiles.yaml")
+        self.user_profile_path = os.path.join(backend_root, "config/user_profile.yaml")
         
         # 加载所有配置
         self.load_all_configs()
         
-        # [修改点] 内存管理器缓存 {session_id: ConversationMemory Object}
+        # [关键修改] 强制计算 Vector Store 的绝对路径
+        # 无论 config 写的是什么相对路径，我们都将其解析为基于 backend 的绝对路径
+        raw_vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
+        if not os.path.isabs(raw_vec_path):
+            # 如果是相对路径，拼接到 backend_root 下
+            vec_path = os.path.normpath(os.path.join(backend_root, raw_vec_path))
+        else:
+            vec_path = raw_vec_path
+
+        print(f"[System]: Memory Database Path Anchored to: {vec_path}") # 打印出来确认
+
+        self.stop_flag = False
         self.memory_cache = {}
         
         # 初始化向量数据库 (RAG)
-        vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
         self.rag_store = RAGStore(persistence_path=vec_path)
 
-        # [新增] 初始化哨兵引擎
-        # 注意：这里只初始化，start() 由 main.py 或外部显式调用，防止在非交互环境下(如测试)意外启动
-        self.sentinel_engine = SentinelEngine()
-        
-        # 初始化工具箱
+        # [修复 Bug ①] 初始化 SentinelEngine，使其成为 HostAgent 的属性
+        # 这里的路径也应该锚定到 backend
+        sentinel_config_path = os.path.join(backend_root, "config/sentinels.json")
+        self.sentinel_engine = SentinelEngine(config_path=sentinel_config_path)
+
+        # 初始化工具箱 (传入 self 以便工具箱访问 stop_flag 和 config)
         self.toolbox = Toolbox(self)
-        
-        # 初始化 LLM 客户端
-        self._init_client()
+
 
     def get_memory(self, session_id=None) -> ConversationMemory:
         """[新增] 获取指定会话的内存对象，如果不存在则创建并缓存"""
@@ -292,7 +304,14 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             
             # 2. 检索长期记忆
             top_k = self.config.get('system', {}).get('memory', {}).get('retrieve_top_k', 3)
-            relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k)
+            # [修改] 读取配置的策略，默认为 semantic
+            rag_strategy = self.config.get('system', {}).get('memory', {}).get('rag_strategy', 'semantic')
+            
+            relevant_docs = self.rag_store.search_memory(
+                user_input, 
+                n_results=top_k, 
+                strategy=rag_strategy  # <--- 传入参数
+            )
             
             # 构建动态 System Prompt
             dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs)
@@ -346,9 +365,8 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     for chunk in response:
                         # [修改点] 实时流检查打断
                         if self.stop_flag:
-                            response.close() # 显式关闭连接
-                            yield {"type": "status", "content": "⛔ Generating Interrupted."}
-                            # 即使打断，也应该保存已经生成的文本，防止记忆断层
+                            response.close() # 显式切断 API 连接
+                            yield {"type": "status", "content": "\n[Stopped]"}
                             break 
 
                         delta = chunk.choices[0].delta

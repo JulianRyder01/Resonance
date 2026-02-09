@@ -326,27 +326,54 @@ class Toolbox:
         return byte_data.decode('utf-8', errors='ignore')
 
     def execute_shell(self, command, cwd=None, timeout=120):
-        """执行 PowerShell 命令 (增强鲁棒性版)"""
+        """
+        执行 PowerShell 命令 (支持实时中断版)
+        [修改点] 使用 Popen + Polling 替代 run，以便在 stop_flag 为 True 时 kill 进程
+        """
         try:
             # 环境准备：强制子进程使用 UTF-8，防止乱码
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
             env["LANG"] = "C.UTF-8"
             
-            # [修改点] 这里的关键是 text=False，捕获原始字节流，避免 subprocess 内部使用默认 gbk 解码崩溃
-            result = subprocess.run(
+            # 使用 Popen 启动进程
+            process = subprocess.Popen(
                 ["powershell", "-Command", command],
-                capture_output=True,
-                text=False,  # <--- 关键修改：禁止自动解码
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=cwd,
-                timeout=timeout,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 env=env
             )
             
+            start_time = time.time()
+            
+            # 轮询检查循环
+            while True:
+                # 1. 检查是否被中断 (Bug ③ Fix)
+                if self.agent.stop_flag:
+                    process.kill()
+                    return "[System]: Command execution was interrupted by user."
+                
+                # 2. 检查是否超时
+                if time.time() - start_time > timeout:
+                    process.kill()
+                    return f"[Error]: Command timed out after {timeout}s."
+                
+                # 3. 检查进程是否结束
+                retcode = process.poll()
+                if retcode is not None:
+                    break
+                
+                # 避免 CPU 空转
+                time.sleep(0.1)
+            
+            # 获取输出
+            stdout_data, stderr_data = process.communicate()
+            
             # 手动安全解码
-            stdout_str = self._safe_decode(result.stdout)
-            stderr_str = self._safe_decode(result.stderr)
+            stdout_str = self._safe_decode(stdout_data)
+            stderr_str = self._safe_decode(stderr_data)
             
             output = stdout_str
             if stderr_str:
@@ -392,7 +419,10 @@ class Toolbox:
         # 处理延迟
         delay_sec = script_info.get('delay', 0)
         if delay_sec and delay_sec > 0:
-            time.sleep(delay_sec)
+            # 支持延迟期间中断
+            for _ in range(int(delay_sec * 10)):
+                if self.agent.stop_flag: return "[System]: Skill delayed execution interrupted."
+                time.sleep(0.1)
             
         # 获取超时配置
         timeout_sec = script_info.get('timeout', 120)

@@ -23,6 +23,7 @@ def send_chat(message, session_id="resonance_main"):
         return response.json()
     except requests.exceptions.ConnectionError:
         print("[Error] Could not connect to Resonance Backend. Is it running?")
+        toast("Resonance", "Could not connect to Resonance Backend. Is it running?", duration="short")
         sys.exit(1)
     except Exception as e:
         print(f"[Error] Request failed: {e}")

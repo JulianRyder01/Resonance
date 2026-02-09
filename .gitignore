@@ -70,3 +70,5 @@ backend/config/config.yaml
 backend/config/user_profile.yaml
 start_resonance.bat
 start_resonance.py
+full_run_resonance.py
+full_run_resonance.bat

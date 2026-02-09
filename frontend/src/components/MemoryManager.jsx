@@ -1,7 +1,6 @@
-// frontend/src/components/MemoryManager.jsx
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Trash2, Search, Database, RefreshCw, Clock, Tag, BarChart3, Zap } from 'lucide-react';
+import { Trash2, Search, Database, RefreshCw, Clock, Tag, BarChart3, Zap, BrainCircuit, Filter } from 'lucide-react';
 import { toast } from 'sonner';
 
 const API_BASE = "http://localhost:8000/api";
@@ -10,22 +9,48 @@ export default function MemoryManager() {
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  
+  // RAG 策略状态
+  const [currentStrategy, setCurrentStrategy] = useState("semantic");
+  const [strategyLoading, setStrategyLoading] = useState(false);
 
+  // 1. 获取配置
+  const fetchConfig = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/config/rag`);
+      setCurrentStrategy(res.data.strategy);
+    } catch (e) {
+      console.error("Failed to fetch RAG strategy");
+    }
+  };
+
+  // 2. 获取记忆数据
   const fetchMemories = async () => {
     setLoading(true);
     try {
       const res = await axios.get(`${API_BASE}/memory`);
-      // 确保数据是数组
       const data = Array.isArray(res.data) ? res.data : [];
-      // 按时间倒序
       const sorted = data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setMemories(sorted);
     } catch (err) {
       console.error(err);
-      toast.error("Failed to load memories");
-      setMemories([]); // 失败时重置为空数组，防止 map 报错
+      toast.error("Failed to load memories (Check backend logs)");
+      setMemories([]); 
     } finally {
       setLoading(false);
+    }
+  };
+
+  const updateStrategy = async (newStrat) => {
+    setStrategyLoading(true);
+    try {
+      await axios.post(`${API_BASE}/config/rag`, { strategy: newStrat });
+      setCurrentStrategy(newStrat);
+      toast.success(`RAG Strategy updated to: ${newStrat}`);
+    } catch (e) {
+      toast.error("Failed to update strategy");
+    } finally {
+      setStrategyLoading(false);
     }
   };
 
@@ -41,6 +66,7 @@ export default function MemoryManager() {
   };
 
   useEffect(() => {
+    fetchConfig();
     fetchMemories();
   }, []);
 
@@ -49,26 +75,24 @@ export default function MemoryManager() {
     (m.type || "").toLowerCase().includes(search.toLowerCase())
   );
 
-  // --- [新增] 数据分析逻辑 ---
+  // 数据统计逻辑
   const stats = useMemo(() => {
     if (!memories.length) return null;
-    
     const total = memories.length;
     
-    // 计算类型分布
-    const typeCounts = {};
-    memories.forEach(m => {
-      const t = m.type || 'unknown';
-      typeCounts[t] = (typeCounts[t] || 0) + 1;
-    });
-    
-    // 找出最热门的记忆
-    const mostAccessed = [...memories].sort((a, b) => b.access_count - a.access_count)[0];
-    
-    // 最近添加
-    const lastAdded = memories[0]; // 已经按时间倒序
+    // 最近30天活跃
+    const now = new Date();
+    const activeRecent = memories.filter(m => {
+        const d = new Date(m.last_accessed);
+        const diffTime = Math.abs(now - d);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        return diffDays <= 7;
+    }).length;
 
-    return { total, typeCounts, mostAccessed, lastAdded };
+    // 最热门
+    const mostAccessed = [...memories].sort((a, b) => b.access_count - a.access_count)[0];
+
+    return { total, activeRecent, mostAccessed };
   }, [memories]);
 
   return (
@@ -80,68 +104,68 @@ export default function MemoryManager() {
           </h1>
           <p className="text-slate-500 mt-1">Manage long-term vector knowledge base (RAG).</p>
         </div>
-        <button 
-          onClick={fetchMemories} 
-          className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 hover:text-primary transition shadow-sm"
-        >
-          <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
-        </button>
+        
+        <div className="flex gap-3">
+            {/* 策略切换器 */}
+            <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg border border-slate-200">
+                <button 
+                    onClick={() => updateStrategy('semantic')}
+                    disabled={strategyLoading}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${currentStrategy === 'semantic' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                    Semantic
+                </button>
+                <button 
+                    onClick={() => updateStrategy('hybrid_time')}
+                    disabled={strategyLoading}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${currentStrategy === 'hybrid_time' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                    Hybrid (Time-Weighted)
+                </button>
+            </div>
+
+            <button 
+            onClick={fetchMemories} 
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 hover:text-primary transition shadow-sm"
+            >
+            <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
+            </button>
+        </div>
       </header>
 
-      {/* --- [新增] 数据分析仪表盘 --- */}
+      {/* --- Dashboard Stats --- */}
       {stats && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 shrink-0">
-          {/* Card 1: Total Volume */}
           <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="p-3 bg-blue-50 text-blue-500 rounded-lg">
-              <Database size={24} />
-            </div>
+            <div className="p-3 bg-blue-50 text-blue-500 rounded-lg"><Database size={24} /></div>
             <div>
-              <div className="text-sm text-slate-500 font-medium">Total Memories</div>
+              <div className="text-sm text-slate-500 font-medium">Total Vectors</div>
               <div className="text-2xl font-bold text-slate-800">{stats.total}</div>
             </div>
           </div>
 
-          {/* Card 2: Top Insight */}
           <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-            <div className="p-3 bg-amber-50 text-amber-500 rounded-lg">
-              <Zap size={24} />
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm text-slate-500 font-medium">Most Accessed</div>
-              <div className="text-xs font-bold text-slate-800 truncate" title={stats.mostAccessed?.content}>
-                {stats.mostAccessed?.content?.substring(0, 30) || "N/A"}...
-              </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">
-                Hits: {stats.mostAccessed?.access_count || 0}
-              </div>
+            <div className="p-3 bg-emerald-50 text-emerald-500 rounded-lg"><Activity size={24} /></div>
+            <div>
+              <div className="text-sm text-slate-500 font-medium">Active (7 Days)</div>
+              <div className="text-2xl font-bold text-slate-800">{stats.activeRecent}</div>
             </div>
           </div>
 
-          {/* Card 3: Type Distribution (Simple Bar) */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-center">
-            <div className="flex items-center gap-2 text-sm text-slate-500 font-medium mb-2">
-              <BarChart3 size={16} /> Type Distribution
-            </div>
-            <div className="flex gap-1 h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-              {Object.entries(stats.typeCounts).map(([type, count], i) => {
-                const colors = ['bg-blue-500', 'bg-purple-500', 'bg-emerald-500', 'bg-amber-500', 'bg-rose-500'];
-                const width = (count / stats.total) * 100;
-                return (
-                  <div key={type} className={`${colors[i % colors.length]}`} style={{ width: `${width}%` }} title={`${type}: ${count}`} />
-                );
-              })}
-            </div>
-            <div className="flex gap-3 mt-2 text-[10px] text-slate-400">
-              {Object.entries(stats.typeCounts).slice(0, 3).map(([type, count]) => (
-                <span key={type}>{type} ({Math.round(count/stats.total*100)}%)</span>
-              ))}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+            <div className="p-3 bg-amber-50 text-amber-500 rounded-lg"><Zap size={24} /></div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-slate-500 font-medium">Top Memory</div>
+              <div className="text-xs font-bold text-slate-800 truncate" title={stats.mostAccessed?.content}>
+                {stats.mostAccessed?.content?.substring(0, 40) || "N/A"}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Recalled {stats.mostAccessed?.access_count || 0} times</div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 搜索栏 */}
+      {/* 搜索 */}
       <div className="mb-6 relative shrink-0">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
         <input 
@@ -152,33 +176,23 @@ export default function MemoryManager() {
         />
       </div>
 
-      {/* 列表内容 */}
+      {/* 列表 */}
       <div className="flex-1 overflow-y-auto bg-white rounded-2xl border border-slate-200 shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
             <tr>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-24">Type</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Content</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-40">Last Access</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-40">Updated</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-20 text-center">Hits</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-20">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-               <tr>
-                <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
-                  <div className="flex justify-center items-center gap-2">
-                    <RefreshCw className="animate-spin" size={20} /> Loading database...
-                  </div>
-                </td>
-              </tr>
+               <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">Loading database...</td></tr>
             ) : filtered.length === 0 ? (
-              <tr>
-                <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
-                  No memories found matching criteria.
-                </td>
-              </tr>
+              <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">Database is empty or no matches found.</td></tr>
             ) : (
               filtered.map((item) => (
                 <tr key={item.id} className="hover:bg-slate-50/80 transition-colors group">
@@ -187,17 +201,12 @@ export default function MemoryManager() {
                       <Tag size={10} /> {item.type}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-sm text-slate-700 leading-relaxed max-w-3xl">
+                  <td className="px-6 py-4 text-sm text-slate-700 leading-relaxed max-w-3xl font-mono text-[13px]">
                     {item.content}
                   </td>
                   <td className="px-6 py-4 text-xs text-slate-500 font-mono whitespace-nowrap">
-                    <div className="flex items-center gap-2">
-                      <Clock size={12} />
-                      {new Date(item.last_accessed).toLocaleDateString()}
-                    </div>
-                    <div className="text-slate-400 ml-5">
-                      {new Date(item.last_accessed).toLocaleTimeString()}
-                    </div>
+                    <div>{new Date(item.last_accessed).toLocaleDateString()}</div>
+                    <div className="text-slate-400">{new Date(item.last_accessed).toLocaleTimeString()}</div>
                   </td>
                   <td className="px-6 py-4 text-center">
                     <span className="px-2 py-1 bg-slate-100 rounded text-xs font-mono font-medium text-slate-600">
@@ -208,7 +217,6 @@ export default function MemoryManager() {
                     <button 
                       onClick={() => deleteMemory(item.id)}
                       className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition opacity-0 group-hover:opacity-100"
-                      title="Delete"
                     >
                       <Trash2 size={16} />
                     </button>

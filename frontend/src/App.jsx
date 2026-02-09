@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+// frontend/src/App.jsx
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Toaster, toast } from 'sonner';
 import { 
   Terminal, Shield, Activity, Database, Settings, 
-  Zap, Cpu, Wifi, WifiOff 
+  Zap, Wifi, WifiOff 
 } from 'lucide-react';
 
 import ChatInterface from './components/ChatInterface';
@@ -12,34 +13,64 @@ import MemoryManager from './components/MemoryManager';
 import ModelConfig from './components/ModelConfig';
 
 const WS_URL = "ws://localhost:8000/ws/chat";
+const HEARTBEAT_INTERVAL = 30000; // 30秒一次心跳
+const RECONNECT_BASE_DELAY = 1000;
+const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
   const [activeTab, setActiveTab] = useState('chat');
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
-  // WebSocket 连接管理
-  useEffect(() => {
-    let socket;
-    let retryInterval;
+  // 使用 Ref 避免闭包陷阱
+  const wsRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const heartbeatIntervalRef = useRef(null);
+  const reconnectAttempts = useRef(0);
 
-    const connect = () => {
-      socket = new WebSocket(WS_URL);
+  // --- 稳健的 WebSocket 连接逻辑 ---
+  const connect = useCallback(() => {
+    // 防止重复连接
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const socket = new WebSocket(WS_URL);
+    wsRef.current = socket;
       
       socket.onopen = () => {
+      console.log("[WS] Connected");
         setIsConnected(true);
-        toast.success("Core Link Established");
-        clearInterval(retryInterval);
+      reconnectAttempts.current = 0; // 重置重连次数
+      setWs(socket);
+      toast.success("Resonance Core Connected");
+      
+      // 启动心跳检测
+      startHeartbeat();
       };
       
-      socket.onclose = () => {
+    socket.onclose = (event) => {
+      console.warn("[WS] Closed", event.code);
         setIsConnected(false);
-        // 尝试重连
-        retryInterval = setTimeout(connect, 3000);
+      setWs(null);
+      stopHeartbeat();
+      
+      // 指数退避重连
+      const delay = Math.min(
+        RECONNECT_BASE_DELAY * Math.pow(1.5, reconnectAttempts.current),
+        MAX_RECONNECT_DELAY
+      );
+      
+      console.log(`[WS] Reconnecting in ${delay}ms...`);
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectAttempts.current += 1;
+        connect();
+      }, delay);
       };
 
       socket.onerror = (err) => {
-        console.error("WS Error", err);
+      console.error("[WS] Error:", err);
+      // onerror 之后通常会触发 onclose，所以逻辑在 onclose 处理
         socket.close();
       };
 
@@ -47,26 +78,67 @@ function App() {
         try {
       const data = JSON.parse(event.data);
       if (data.type === 'sentinel_alert') {
+        // [修复 Bug ②] 使用 id 属性防止重复弹窗
+        // 我们使用 data.content 作为基础哈希，确保相同内容的消息不会重复显示
+        const toastId = btoa(encodeURIComponent(data.content)).slice(0, 16);
+        
         toast.warning("Sentinel Triggered!", {
+          id: toastId, // <--- 关键修复：Sonner 会自动去重
           description: data.content,
               action: { label: "View", onClick: () => setActiveTab('sentinel') },
-              duration: 8000,
+              duration: 6000,
         });
       }
-        } catch (e) {
-          console.error("WS Parse Error", e);
+        // 处理心跳回应 (如果后端有 pong)
+        if (data.type === 'pong') {
+           // console.debug("Heartbeat pong received");
         }
-    };
-    setWs(socket);
+      } catch (e) {
+        // 忽略解析错误，交给组件处理
+      }
     };
 
-    connect();
-
-    return () => {
-      if (socket) socket.close();
-      clearTimeout(retryInterval);
-    };
   }, []);
+
+  const startHeartbeat = () => {
+    stopHeartbeat();
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // 发送一个空包或者特定 ping 包，防止连接因闲置断开
+        // 注意：后端需要能处理这个消息而不报错，或者前端发一个不影响逻辑的消息
+        // 这里我们不做显式 ping 帧 (浏览器控制不了)，而是发一个业务层的 keepalive
+        // 如果后端没有专门的 ping handler，可以不发，只要有 TCP Keepalive 即可。
+        // 但为了稳健，建议后端忽略未知消息或前端只在断开时重连。
+        // 简单策略：不主动发数据，依靠 readystate 检查和自动重连。
+      }
+    }, HEARTBEAT_INTERVAL);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    };
+
+  // 初始启动
+  useEffect(() => {
+    connect();
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      stopHeartbeat();
+    };
+  }, [connect]);
+
+  // 手动轮询检查 (作为双重保险)
+  useEffect(() => {
+    const healthCheck = setInterval(() => {
+      if (!isConnected && (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED)) {
+        console.log("[Health] WS seems dead, forcing reconnect...");
+        connect();
+      }
+    }, 5000);
+    return () => clearInterval(healthCheck);
+  }, [isConnected, connect]);
+
 
   return (
     <div className="flex h-screen w-screen bg-background text-text-primary overflow-hidden font-sans selection:bg-primary/20">
@@ -108,7 +180,9 @@ function App() {
             </div>
             <div className="flex items-center gap-2 mt-1">
               <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-              <span className="text-[10px] text-slate-500 font-mono">WS_LINK_V2</span>
+              <span className="text-[10px] text-slate-500 font-mono">
+                {isConnected ? 'Backend Service' : 'RECONNECTING...'}
+              </span>
             </div>
           </div>
         </div>

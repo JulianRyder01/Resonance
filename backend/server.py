@@ -20,6 +20,9 @@ from core.host_agent import HostAgent
 from core.memory import ConversationMemory
 from utils.monitor import SystemMonitor
 
+# RAG 策略
+class RAGConfigUpdate(BaseModel):
+    strategy: str # 'semantic' or 'hybrid_time'
 # --- 配置日志 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ResonanceBackend")
@@ -46,11 +49,30 @@ class GlobalState:
         logger.info("HostAgent & SentinelEngine Started.")
 
 state = GlobalState()
-# [修改点] 在 FastAPI 启动时捕获主事件循环
+
 @app.on_event("startup")
 async def startup_event():
     state.loop = asyncio.get_running_loop()
     logger.info("Main Event Loop captured for thread-safe bridging.")
+    
+    # --- [新增] 数据库自检与种子注入 ---
+    try:
+        count = state.agent.rag_store.count()
+        logger.info(f"[RAG Check]: Current memory count: {count}")
+        
+        if count == 0:
+            logger.info("[RAG Init]: Database is empty. Injecting seed memory...")
+            state.agent.rag_store.add_memory(
+                text="Welcome to Resonance. This is the first permanent memory block created to initialize the Vector Database.",
+                metadata={
+                    "type": "system_init",
+                    "source": "server_startup"
+                }
+            )
+            logger.info("[RAG Init]: Seed memory injected successfully.")
+    except Exception as e:
+        logger.error(f"[RAG Init Error]: {e}")
+        
 # --- Pydantic Models for Config API ---
 class ProfileUpdate(BaseModel):
     profile_id: str
@@ -211,6 +233,31 @@ async def delete_sentinel(s_type: str, s_id: str):
     if not success:
         raise HTTPException(status_code=404, detail="Sentinel not found")
     return {"status": "deleted"}
+
+# --- [新增] RAG 配置接口 ---
+@app.get("/api/config/rag")
+async def get_rag_config():
+    """获取当前 RAG 策略"""
+    strategy = state.agent.config.get('system', {}).get('memory', {}).get('rag_strategy', 'semantic')
+    return {"strategy": strategy}
+
+@app.post("/api/config/rag")
+async def set_rag_config(update: RAGConfigUpdate):
+    """设置 RAG 策略"""
+    if update.strategy not in ['semantic', 'hybrid_time']:
+        raise HTTPException(status_code=400, detail="Invalid strategy. Use 'semantic' or 'hybrid_time'.")
+    
+    # 更新内存中的配置
+    if 'system' not in state.agent.config: state.agent.config['system'] = {}
+    if 'memory' not in state.agent.config['system']: state.agent.config['system']['memory'] = {}
+    
+    state.agent.config['system']['memory']['rag_strategy'] = update.strategy
+    
+    # 持久化到文件
+    state.agent.update_config(new_config=state.agent.config)
+    
+    return {"status": "updated", "strategy": update.strategy}
+
 
 @app.get("/api/skills")
 async def get_skills():

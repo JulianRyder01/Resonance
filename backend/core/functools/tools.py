@@ -6,6 +6,7 @@ import sys
 import subprocess
 import time
 import json
+import threading
 from core.functools.web_engine import WebEngine
 
 class Toolbox:
@@ -325,10 +326,10 @@ class Toolbox:
         # 3. 最后尝试忽略错误的 UTF-8
         return byte_data.decode('utf-8', errors='ignore')
 
-    def execute_shell(self, command, cwd=None, timeout=120):
+    def execute_shell(self, command, cwd=None, timeout=120, stop_event=None):
         """
         执行 PowerShell 命令 (支持实时中断版)
-        [修改点] 使用 Popen + Polling 替代 run，以便在 stop_flag 为 True 时 kill 进程
+        [修改点] 支持传入 stop_event (threading.Event) 进行即时中断检测
         """
         try:
             # 环境准备：强制子进程使用 UTF-8，防止乱码
@@ -336,6 +337,10 @@ class Toolbox:
             env["PYTHONIOENCODING"] = "utf-8"
             env["LANG"] = "C.UTF-8"
             
+            # [修改点] 启动前检查
+            if stop_event and stop_event.is_set():
+                return "[System]: Command cancelled before execution."
+
             # 使用 Popen 启动进程
             process = subprocess.Popen(
                 ["powershell", "-Command", command],
@@ -350,8 +355,8 @@ class Toolbox:
             
             # 轮询检查循环
             while True:
-                # 1. 检查是否被中断 (Bug ③ Fix)
-                if self.agent.stop_flag:
+                # 1. 检查是否被中断 (Robust Interrupt)
+                if stop_event and stop_event.is_set():
                     process.kill()
                     return "[System]: Command execution was interrupted by user."
                 
@@ -388,7 +393,7 @@ class Toolbox:
         except Exception as e:
             return f"[System Error]: {str(e)}"
 
-    def invoke_registered_skill(self, skill_alias, args_str=""):
+    def invoke_registered_skill(self, skill_alias, args_str="", stop_event=None):
         """运行 Config 中预定义的技能"""
         scripts = self.agent.config.get('scripts', {})
         
@@ -421,13 +426,14 @@ class Toolbox:
         if delay_sec and delay_sec > 0:
             # 支持延迟期间中断
             for _ in range(int(delay_sec * 10)):
-                if self.agent.stop_flag: return "[System]: Skill delayed execution interrupted."
+                if stop_event and stop_event.is_set(): 
+                    return "[System]: Skill delayed execution interrupted."
                 time.sleep(0.1)
             
         # 获取超时配置
         timeout_sec = script_info.get('timeout', 120)
         
-        return self.execute_shell(final_command, cwd=cwd, timeout=timeout_sec)
+        return self.execute_shell(final_command, cwd=cwd, timeout=timeout_sec, stop_event=stop_event)
 
     # [修改点] 增强文件读取逻辑
     def read_file_content(self, file_path):
@@ -542,9 +548,10 @@ class Toolbox:
         return "\n".join(results)
 
     # [新增] 关键词搜索工具
-    def search_files_by_keyword(self, directory_path, keyword):
+    def search_files_by_keyword(self, directory_path, keyword, stop_event=None):
         """
         简单粗暴的 grep 逻辑：遍历目录下所有文本文件，查找包含 keyword 的文件。
+        [修改点] 支持 stop_event 中断
         """
         if not os.path.exists(directory_path):
             return f"Error: Path '{directory_path}' not found."
@@ -558,9 +565,15 @@ class Toolbox:
         TEXT_EXTS = {'.md', '.txt', '.py', '.json', '.yaml', '.csv', '.log', '.xml', '.html', '.css', '.js'}
 
         for root, dirs, files in os.walk(directory_path):
+            if stop_event and stop_event.is_set():
+                return "[System]: Search interrupted."
+
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             
             for file in files:
+                if stop_event and stop_event.is_set():
+                    return "[System]: Search interrupted."
+
                 if scanned_count > MAX_SCAN:
                     break
                     

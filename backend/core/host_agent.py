@@ -4,7 +4,7 @@ import json
 import os
 import time
 import threading
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError
 from core.memory import ConversationMemory
 # [修改点] 导入解耦后的工具箱
 from core.functools.tools import Toolbox
@@ -16,7 +16,10 @@ class HostAgent:
     def __init__(self, default_session="resonance_main", config_path="config/config.yaml"):
         # [修改点] 默认会话ID
         self.default_session_id = default_session
-        self.active_session_id = default_session
+        self.active_session_id = default_session # 仅用于 backward compatibility
+        
+        # [新增] 会话级中断事件字典 {session_id: threading.Event}
+        self.interrupt_events = {}
         
         # --- [关键修改开始] 路径锚定修复 ---
         # 获取当前 host_agent.py 的绝对路径: .../backend/core/host_agent.py
@@ -31,7 +34,7 @@ class HostAgent:
         
         # 加载所有配置
         self.load_all_configs()
-        
+
         # [关键修改] 强制计算 Vector Store 的绝对路径
         # 无论 config 写的是什么相对路径，我们都将其解析为基于 backend 的绝对路径
         raw_vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
@@ -56,6 +59,10 @@ class HostAgent:
 
         # 初始化工具箱 (传入 self 以便工具箱访问 stop_flag 和 config)
         self.toolbox = Toolbox(self)
+        
+        # 初始化 LLM Client
+        self.client = None
+        self._init_client()
 
 
     def get_memory(self, session_id=None) -> ConversationMemory:
@@ -67,6 +74,7 @@ class HostAgent:
         return self.memory_cache[sid]
 
     # [新增] 为了兼容旧代码引用 self.memory 的地方，使用 property 代理当前活动会话
+    # 注意：在多线程环境中请尽量使用 get_memory(session_id) 明确指定
     @property
     def memory(self):
         return self.get_memory(self.active_session_id)
@@ -74,8 +82,12 @@ class HostAgent:
     def load_all_configs(self):
         """加载系统配置、模型配置和用户画像"""
         # 1. 加载主配置
-        with open(self.config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
+        if os.path.exists(self.config_path):
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                self.config = yaml.safe_load(f)
+        else:
+            print(f"[Critical Warning] Config not found at {self.config_path}")
+            self.config = {}
             
         # 2. 加载模型 Profiles
         if os.path.exists(self.profiles_path):
@@ -97,22 +109,35 @@ class HostAgent:
         
         # 容错处理：如果找不到 profile，使用默认或空配置
         if active_id not in self.profiles:
-            print(f"[Warning] Profile '{active_id}' not found. Using safe defaults.")
+            print(f"[Warning] Profile '{active_id}' not found in profiles.yaml. Using safe defaults.")
             self.current_model_config = {
-                'api_key': self.config.get('agent', {}).get('openai_api_key', 'EMPTY'),
-                'base_url': self.config.get('agent', {}).get('openai_base_url', None),
+                'api_key': 'EMPTY',
+                'base_url': None,
                 'model': 'gpt-3.5-turbo',
                 'temperature': 0.7
             }
         else:
             self.current_model_config = self.profiles[active_id]
-            
-        self.client = OpenAI(
-            api_key=self.current_model_config['api_key'],
-            base_url=self.current_model_config.get('base_url')
-        )
+        
+        self.base_url = self.current_model_config.get('base_url')
+        self.api_key = self.current_model_config.get('api_key')
 
-    def _build_dynamic_system_prompt(self, relevant_memories: list):
+        # 初始化 OpenAI 客户端
+        try:
+            self.client = OpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout=60.0,  # 设置超时防止无限等待
+                max_retries=2
+            )
+            print(f"[LLM Init]: Client configured. URL: {self.base_url}, Model: {self.current_model_config.get('model')}")
+        except Exception as e:
+            print(f"[LLM Error]: Failed to initialize OpenAI client: {e}")
+            # 即使失败，也定义为 None，防止 AttributeError，并在 chat 中处理
+            self.client = None
+
+
+    def _build_dynamic_system_prompt(self, relevant_memories: list, memory_instance: ConversationMemory):
         """
         构建高级结构化 Prompt
         包含：身份、工具能力、用户画像、长期记忆(RAG)、当前对话摘要
@@ -152,9 +177,8 @@ Core Principles:
                 rag_section += f"- {mem}\n"
             rag_section += "(Use these memories to answer contextually if applicable)\n"
 
-        # 4. 对话摘要注入 (Summary)
-        # [修改点] 使用当前活动会话的摘要
-        summary_text = self.memory.load_summary()
+        # [修改点] 使用传入的 memory_instance
+        summary_text = memory_instance.load_summary()
         summary_section = ""
         if summary_text:
             summary_section = f"\n[Previous Conversation Summary]\n{summary_text}\n(This is what happened before the current active window)\n"
@@ -164,26 +188,25 @@ Core Principles:
         
         return full_prompt
 
-    def _update_summary_if_needed(self):
-        """
-        [摘要机制] 检查是否需要压缩历史记录
-        如果历史记录超过一定长度，调用 LLM 生成摘要
-        """
+    def _update_summary_if_needed(self, memory_instance: ConversationMemory):
+        """[摘要机制] 检查是否需要压缩历史记录"""
         if not self.config['system'].get('memory', {}).get('enable_summary', True):
             return
 
-        # 策略：每隔 5 轮 (10条消息) 更新一次摘要
-        full_log = self.memory.get_full_log()
+        full_log = memory_instance.get_full_log()
         if len(full_log) > 0 and len(full_log) % 10 == 0:
-            # 只有当有足够多的历史在窗口之外时才总结
-            text_to_summarize = self.memory.get_messages_for_summarization()
+            text_to_summarize = memory_instance.get_messages_for_summarization()
             if not text_to_summarize:
                 return
 
-            current_summary = self.memory.load_summary()
+            current_summary = memory_instance.load_summary()
             
             # 使用 LLM 生成摘要
             try:
+                # [BUG FIX Check] Ensure client exists before summarizing
+                if not self.client:
+                    return
+
                 prompt = f"""
                 You are a memory compressor.
                 
@@ -205,19 +228,24 @@ Core Principles:
                 
                 new_summary = response.choices[0].message.content
                 self.memory.save_summary(new_summary)
-                # print(f"[System]: Memory summarized. Length: {len(new_summary)}")
+                print(f"[System]: Memory summarized. Length: {len(new_summary)}")
+                print(f"[System]: Memory preview: {new_summary}")
             except Exception as e:
                 print(f"[Warning] Failed to generate summary: {e}")
 
     # =========================================================================
     # [新增核心逻辑] 异步记忆萃取与存储
     # =========================================================================
-    def _extract_and_save_memory_async(self, turn_events_log):
+    def _extract_and_save_memory_async(self, turn_events_log, session_id):
         """
         后台线程任务：分析对话，萃取有价值的信息存入向量库。
         避免将垃圾对话（"你好", "嗯"）存入。
         """
         try:
+            # [BUG FIX Check]
+            if not self.client:
+                return
+
             # 调用 LLM 进行信息萃取 (Extraction)
             # 使用更便宜的模型或相同的模型，Prompt 侧重于"事实提取"
             extraction_prompt = f"""
@@ -252,26 +280,33 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     text=extracted_info,
                     metadata={
                         "type": "conversation_insight",
-                        "session": self.active_session_id,
-                        "original_user_input": turn_events_log[:50] # 方便追溯
+                        "session": session_id,
+                        "original_user_input": turn_events_log[:50]
                     }
                 )
                 if success:
                     # 在日志中静默记录，用于调试，不干扰主线程输出
-                    # print(f"[Memory System]: Archived -> {extracted_info[:30]}...")
+                    print(f"[Memory System]: Memory Extracted. Archived -> {extracted_info}")
                     pass
 
         except Exception as e:
             # 这里的异常绝对不能影响主线程
             print(f"[Memory System Error]: {e}")
 
-    # [新增] 外部调用中断方法
-    def interrupt(self):
+    # [新增] 外部调用中断方法 (支持会话级中断)
+    def interrupt(self, session_id=None):
         """触发中断信号"""
-        print("[System]: Interrupt signal received.")
-        self.stop_flag = True
+        if session_id:
+            # 中断特定会话
+            if session_id in self.interrupt_events:
+                print(f"[System]: Interrupting session '{session_id}'")
+                self.interrupt_events[session_id].set()
+        else:
+            # 中断所有 (保留旧行为)
+            print("[System]: Interrupting ALL sessions.")
+            for evt in self.interrupt_events.values():
+                evt.set()
 
-    # [新增] 处理哨兵触发的事件，将其注入到主进程内存中
     def handle_sentinel_trigger(self, message):
         """
         当哨兵触发时调用。
@@ -289,18 +324,28 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
     def chat(self, user_input, session_id="default"):
         """
-        主交互逻辑 (Generator):
+        主交互逻辑 (Generator) - 线程安全版本
         Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
         """
-        # [修改点] 切换上下文
-        self.active_session_id = session_id
+        # [并发安全] 初始化该会话的中断事件
+        if session_id not in self.interrupt_events:
+            self.interrupt_events[session_id] = threading.Event()
+        stop_event = self.interrupt_events[session_id]
+        stop_event.clear() # 重置状态
+
+        # [并发安全] 获取会话专属内存
+        session_memory = self.get_memory(session_id)
         
-        # [修改点] 重置打断标志
-        self.stop_flag = False
-        
+        # -------------------------------------------------------------
+        # 检查 Client 是否已初始化
+        # -------------------------------------------------------------
+        if self.client is None:
+            yield {"type": "error", "content": "LLM Client is not initialized. Check profiles.yaml."}
+            return
+
         try:
             # 记录初始用户消息
-            self.memory.add_user_message(user_input)
+            session_memory.add_user_message(user_input)
             
             # 2. 检索长期记忆
             top_k = self.config.get('system', {}).get('memory', {}).get('retrieve_top_k', 3)
@@ -314,11 +359,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             )
             
             # 构建动态 System Prompt
-            dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs)
+            dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory)
             
             # messages 列表将作为我们在这一轮推理中的“工作区”
             messages = [{"role": "system", "content": dynamic_sys_prompt}]
-            messages += self.memory.get_active_context() # 获取滑动窗口
+            messages += session_memory.get_active_context() 
             messages.append({"role": "user", "content": user_input})
             
             # 2. 准备工具
@@ -330,11 +375,10 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             turn_log_for_extraction = f"User Input: {user_input}\n"
             max_iterations = 24  # 防止模型陷入死循环
             current_iteration = 0
-            final_full_content = ""
 
             while current_iteration < max_iterations:
                 # [修改点] 循环开始前检查打断
-                if self.stop_flag:
+                if stop_event.is_set():
                     yield {"type": "status", "content": "⛔ Task Interrupted by User."}
                     break
 
@@ -343,19 +387,24 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 # [关键修改]：每一轮推理都重新从 memory 获取经清洗后的上下文
                 # 不要相信上一个循环里的 messages 列表，因为它可能在打断后受损
                 messages = [{"role": "system", "content": dynamic_sys_prompt}]
-                messages += self.memory.get_active_context() 
+                messages += session_memory.get_active_context() 
 
                 yield {"type": "status", "content": f"Thinking (Step {current_iteration})..."}
 
                 # 调用 OpenAI Stream
-                response = self.client.chat.completions.create(
-                    model=self.current_model_config['model'],
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    temperature=self.current_model_config['temperature'],
-                    stream=True  # [关键点] 开启流式
-                )
+                # 注意：如果此处 OpenAI 响应非常慢，依然会有 IO 阻塞，但 Python 线程可以响应 event
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.current_model_config['model'],
+                        messages=messages,
+                        tools=self.toolbox.get_tool_definitions(),
+                        tool_choice="auto",
+                        temperature=self.current_model_config['temperature'],
+                        stream=True
+                    )
+                except Exception as e:
+                    yield {"type": "error", "content": f"LLM API Error: {str(e)}"}
+                    break
 
                 full_response_content = ""
                 tool_calls_buffer = {} # 用于收集流式的 tool_calls
@@ -364,7 +413,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 try:
                     for chunk in response:
                         # [修改点] 实时流检查打断
-                        if self.stop_flag:
+                        if stop_event.is_set():
                             response.close() # 显式切断 API 连接
                             yield {"type": "status", "content": "\n[Stopped]"}
                             break 
@@ -398,6 +447,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 if full_response_content:
                     turn_log_for_extraction += f"AI Thought: {full_response_content}\n"
 
+                # [关键修改] 如果已经打断，直接退出外层循环
+                if stop_event.is_set():
+                    break
+
+                # 处理 Tool Calls
                 active_tool_calls = []
                 for _, tc_data in tool_calls_buffer.items():
                     # 模拟 OpenAI 的对象结构供逻辑复用
@@ -409,9 +463,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
                 # 记录到内存 (模拟原有非流式逻辑的保存)
                 if active_tool_calls:
-                    # 如果有工具调用，必须完整记录，否则下一次API调用会报错(400)
-                    self.memory.add_ai_tool_call(full_response_content, active_tool_calls)
-                    # 将这一轮的响应加入上下文
+                    session_memory.add_ai_tool_call(full_response_content, active_tool_calls)
                     messages.append({
                         "role": "assistant",
                         "content": full_response_content,
@@ -424,12 +476,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                         ]
                     })
                 else:
-                    self.memory.add_ai_message(full_response_content)
+                    session_memory.add_ai_message(full_response_content)
                     messages.append({"role": "assistant", "content": full_response_content})
-                    final_full_content = full_response_content
 
                 # [修改点] 如果已经打断，且没有工具调用，直接退出外层循环
-                if self.stop_flag:
+                if stop_event.is_set():
                     break
 
                 # C. 执行工具
@@ -437,8 +488,8 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     break
                 
                 for tc in active_tool_calls:
-                    # [修改点] 工具执行前检查打断
-                    if self.stop_flag:
+                    # [修改点] 工具执行前检查打断 - 立即停止即将发生的操作
+                    if stop_event.is_set():
                         yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
                         break
 
@@ -452,8 +503,8 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     
                     yield {"type": "status", "content": f"Executing tool: {func_name}..."}
                     
-                    # 执行并获取结果
-                    tool_result = self._route_tool_execution(func_name, args)
+                    # [关键修改] 将 stop_event 传递给工具路由，支持工具内部中断
+                    tool_result = self._route_tool_execution(func_name, args, stop_event)
                     
                     # 关键可视化：发送工具结果
                     yield {"type": "tool", "name": func_name, "content": tool_result}
@@ -462,7 +513,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     # 将工具结果也存入萃取日志
                     turn_log_for_extraction += f"Tool Output ({func_name}): {str(tool_result)[:1000]}\n" # 截断过长的输出以节省Token
                     
-                    self.memory.add_tool_message(tool_result, tc.id)
+                    session_memory.add_tool_message(tool_result, tc.id)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -470,13 +521,13 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                         "content": str(tool_result)
                     })
 
-            self._update_summary_if_needed()
+            self._update_summary_if_needed(session_memory)
             
             # 8. [修改点] 启动异步线程进行记忆萃取与向量存储
             # 使用守护线程 (daemon=True)，主程序退出时它自动结束，不会卡死进程
             memory_thread = threading.Thread(
                 target=self._extract_and_save_memory_async,
-                args=(turn_log_for_extraction,),
+                args=(turn_log_for_extraction, session_id), # 传递 session_id
                 daemon=True
             )
             memory_thread.start()
@@ -484,18 +535,33 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
         except Exception as e:
             import traceback
-            yield {"type": "error", "content": str(traceback.format_exc())}
+            error_details = traceback.format_exc()
+            print(error_details) # 在控制台打印详细堆栈
+            yield {"type": "error", "content": str(error_details)}
+        finally:
+            # 清理事件引用（可选，防止内存泄漏）
+            if session_id in self.interrupt_events:
+                # 任务结束后并不一定要删除 Event，可以留着复用，只要每次 chat start 时 clear 即可
+                pass
 
-    def _route_tool_execution(self, function_name, args):
-        """路由工具调用到 Toolbox，保持代码整洁"""
+    def _route_tool_execution(self, function_name, args, stop_event=None):
+        """
+        路由工具调用到 Toolbox
+        [新增] stop_event 参数，传递给支持中断的工具
+        """
         try:
+            # 检查是否有高优先级的打断
+            if stop_event and stop_event.is_set():
+                return "[System]: Tool execution cancelled by user."
+
             if function_name in ["invoke_skill", "run_registered_script"]:
                 alias = args.get("skill_alias") or args.get("script_alias")
                 extra = args.get("args", "")
-                return self.toolbox.invoke_registered_skill(alias, extra)
+                # 传递 stop_event
+                return self.toolbox.invoke_registered_skill(alias, extra, stop_event)
                 
             elif function_name == "execute_shell_command":
-                return self.toolbox.execute_shell(args.get("command"))
+                return self.toolbox.execute_shell(args.get("command"), stop_event=stop_event)
                 
             elif function_name == "add_automation_skill":
                 return self.toolbox.add_new_script(args.get("alias"), args.get("command"), args.get("description"))
@@ -519,9 +585,11 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 )
                 
             elif function_name == "search_files_by_keyword":
+                # 搜索也可能耗时，传递 stop_event
                 return self.toolbox.search_files_by_keyword(
                     directory_path=args.get("directory_path"), 
-                    keyword=args.get("keyword")
+                    keyword=args.get("keyword"),
+                    stop_event=stop_event
                 )
             
             # [修改点] 增加联网工具路由

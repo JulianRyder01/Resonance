@@ -156,9 +156,20 @@ export default function ChatInterface({ ws, isConnected }) {
           });
         } 
         else if (data.type === 'user') {
-          setMessages(prev => [...prev, { role: 'user', content: data.content }]);
+          setMessages(prev => {
+            // 检查 ID 是否已经存在于当前列表中
+            const exists = prev.some(m => m.id === data.id);
+            if (exists) return prev; // 如果已存在（本地已添加），则忽略回显
+            
+            // 如果不存在（比如是从另一个设备同步过来的消息），则添加
+            return [...prev, { 
+              role: 'user', 
+              content: data.content, 
+              id: data.id || Date.now().toString() 
+            }];
+          });
           setIsTyping(true);
-        } 
+        }
         else if (data.type === 'done') {
           setMessages(prev => prev.map(m => ({ ...m, complete: true })));
           setIsTyping(false);
@@ -172,6 +183,13 @@ export default function ChatInterface({ ws, isConnected }) {
             content: String(data.content ?? "No output") 
           }]);
         } 
+        else if (data.type === 'status') {
+            // 处理后端发来的状态信息，例如 Stop 确认
+            if (data.content.includes("Aborted") || data.content.includes("Stop")) {
+                setIsTyping(false); // 强制停止加载状态
+                setMessages(prev => [...prev, { role: 'system', content: data.content }]);
+            }
+        } 
         else if (data.type === 'error') {
           toast.error("AI Core Error", { description: data.content });
           setIsTyping(false);
@@ -183,7 +201,7 @@ export default function ChatInterface({ ws, isConnected }) {
 
     ws.addEventListener('message', handleMsg);
     return () => ws.removeEventListener('message', handleMsg);
-  }, [ws]);
+  }, [ws, activeSessionId]); // 依赖 activeSessionId 确保消息路由正确
 
   // 自动滚动
   useEffect(() => {
@@ -193,23 +211,41 @@ export default function ChatInterface({ ws, isConnected }) {
   }, [messages, isTyping]);
 
   const sendMessage = () => {
-    if (!input.trim() || !isConnected) return;
-    try {
-      // [关键] 发送时携带 session_id
-      ws.send(JSON.stringify({ 
-        message: input,
-        session_id: activeSessionId
-      }));
-      setInput("");
-    } catch (err) {
-      toast.error("Network Error");
-    }
+  if (!input.trim() || !isConnected) return;
+  
+  const tempId = Date.now().toString(); // 生成临时 ID
+  const messageText = input;
+
+  // 1. 本地立即显示 (但逻辑上标记为待确认)
+  // 如果是 /stop 指令，我们不把它存入对话气泡，保持界面整洁
+  if (messageText !== "/stop") {
+    setMessages(prev => [...prev, { 
+      role: 'user', 
+      content: messageText, 
+      id: tempId // 存入 ID
+    }]);
+  }
+
+  try {
+    ws.send(JSON.stringify({ 
+      message: messageText,
+      session_id: activeSessionId,
+      id: tempId // 发送 ID 给后端
+    }));
+    setInput("");
+  } catch (err) {
+    toast.error(err);
+  }
   };
 
   const handleInterrupt = () => {
     if (ws && isConnected) {
       ws.send(JSON.stringify({ message: "/stop", session_id: activeSessionId }));
-      toast.info("Interrupt sent");
+      
+      // 立即在前端给予反馈，不要等待后端
+      toast.info("Interrupting AI...");
+      // 我们不在这里设置 isTyping(false)，因为我们要等待后端确认 'status' 消息
+      // 这样可以确保后端确实收到了指令并停止了处理
     }
   };
 
@@ -318,6 +354,7 @@ export default function ChatInterface({ ws, isConnected }) {
             </div>
           </div>
           <div className="flex gap-2">
+            {/* Stop 按钮逻辑优化：只有在 typing 时显示 */}
             {isTyping && (
               <button 
                 onClick={handleInterrupt}

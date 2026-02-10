@@ -1,4 +1,4 @@
-# 💠 Resonance AI Host
+# 💠 Resonance Windows Agent
 
 **Echoing Intelligence Locally.**  
 一个专为 Windows 打造的高级本地智能体 (AI Agent) 主机。它不仅仅是聊天机器人，更是连接大模型（本地/云端）与系统底层的桥梁。
@@ -7,7 +7,7 @@
 ![React](https://img.shields.io/badge/Frontend-React_19-61DAFB?logo=react)
 ![Tailwind](https://img.shields.io/badge/CSS-Tailwind_v4-38B2AC?logo=tailwindcss)
 ![Vite](https://img.shields.io/badge/Build-Vite_6-646CFF?logo=vite)
-![alt text](docs/image.png)
+![Resonance 界面](docs/doc_image1.png)
 ---
 
 ## 🌟 核心特性
@@ -17,7 +17,11 @@
 *   **🛡️ 哨兵系统 (Sentinels)**：自主监控时间触发器、文件变更和全局快捷键，变被动对话为主动通知。
 *   **💾 向量长时记忆**：基于 ChromaDB 的 RAG 引擎，自动萃取对话中的关键事实，随时间自我进化。
 *   **🖥️ 现代交互界面**：基于 Tailwind CSS v4 的极简科技感 Web 控制台。
+  
+---
+本地存储记忆库 隐私安全不外露 此处为示例
 
+![本地存储记忆库 隐私安全不外露](docs/doc_image2.png)
 ---
 
 ## 🚀 快速开始 (Startup)

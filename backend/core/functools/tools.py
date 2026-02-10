@@ -22,11 +22,46 @@ class Toolbox:
 
     def get_tool_definitions(self):
         """
-        获取传递给 LLM 的 tools 定义 (JSON Schema)
-        [优化] 动态合并：Native Tools + Config Scripts + Imported Skills
+        [Visibility Control] 动态返回工具定义。
+        逻辑：Native Tools + (Active Skill Tools OR Discovery Tool)
         """
+        # 1. 始终可见的基础工具 (Native)
+        tools = self._get_native_tools()
+
+        # 2. [关键逻辑] 仅当 Skill 激活时，才暴露其专属工具
+        if hasattr(self.agent, 'active_skill') and self.agent.active_skill:
+            res = self.agent.skill_manager.load_skill_context(self.agent.active_skill)
+            if res:
+                _, skill_tools = res
+                if skill_tools:
+                    # 避免重复添加：检查工具名是否已存在
+                    existing_names = {t['function']['name'] for t in tools if t['type'] == 'function'}
+                    for st in skill_tools:
+                        if st['function']['name'] not in existing_names:
+                            tools.append(st)
+        
+
+        return tools
+    
+    def _get_native_tools(self):
         # 1. 基础内置工具
         tools = [
+            # --- 技能管理 (认知负荷管理的核心) ---
+            {
+                "type": "function",
+                "function": {
+                    "name": "manage_skills",
+                    "description": "Manage AI Skills. Use 'list_available' to see the index of skills. Use 'activate' to load a specific skill's SOP and tools.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["list_available", "activate", "deactivate_all"]},
+                            "skill_name": {"type": "string", "description": "Required if action is 'activate'."}
+                        },
+                        "required": ["action"]
+                    }
+                }
+            },
             # --- 核心能力 ---
             {
                 "type": "function",
@@ -181,13 +216,10 @@ class Toolbox:
                 }
             })
 
-        # 3. [关键修改] 动态加载 Imported Skills (from SkillManager)
-        if hasattr(self.agent, 'skill_manager') and self.agent.skill_manager:
-            imported_tools = self.agent.skill_manager.get_tool_definitions_json()
-            tools.extend(imported_tools)
 
         # 4. 哨兵系统工具
         tools.extend(self._get_sentinel_tools())
+
 
         return tools
 
@@ -266,6 +298,37 @@ class Toolbox:
 
     # --- 具体实现 ---
 
+    def manage_skills(self, action, skill_name=None):
+        """
+        认知负荷管理工具的实现。
+        """
+        if action == "list_available":
+            return self.agent.skill_manager.get_skill_index()
+        
+        elif action == "activate":
+            if not skill_name:
+                return "Error: skill_name is required for activation."
+            # 调用 Agent 的方法来改变状态 (HostAgent 会处理 SOP 注入)
+            return self.agent.activate_skill(skill_name)
+            
+        elif action == "deactivate_all":
+            self.agent.active_skill = None
+            return "All skills deactivated. Context cleaned."
+            
+        return "Unknown action."
+
+    def route_skill_tool(self, tool_name, args):
+        """
+        如果 active_skill 存在，尝试在其中寻找并执行该工具。
+        """
+        if not self.agent.active_skill:
+            return None # 没有激活的技能
+        
+        skill_name = self.agent.active_skill
+        # 检查该工具是否属于当前技能 (简单检查：直接尝试执行)
+        # 在更严谨的实现中，应该检查 tools.json
+        return self.agent.skill_manager.execute_skill_tool(skill_name, tool_name, args)
+    
     def learn_new_skill(self, url_or_path):
         """
         连接到 SkillManager 的学习方法

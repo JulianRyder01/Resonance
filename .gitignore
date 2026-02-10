@@ -21,6 +21,7 @@ logs/
 webpage_data_*.json
 # 任何日志文件
 *.log
+SKILLS/
 
 # ========================
 # 3. Python 标准忽略

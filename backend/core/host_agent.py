@@ -62,6 +62,10 @@ class HostAgent:
         # [新增] 初始化 SkillManager
         self.skill_manager = SkillManager(self)
 
+        # [修复 Bug ②] 初始化 active_skill 状态，防止 AttributeError
+        # 这是"认知负荷管理"的核心状态：当前聚焦的技能
+        self.active_skill = None 
+
         # 工具箱
         self.toolbox = Toolbox(self)
         
@@ -81,8 +85,6 @@ class HostAgent:
             self.memory_cache[sid] = ConversationMemory(session_id=sid, window_size=win_size)
         return self.memory_cache[sid]
 
-    # [新增] 为了兼容旧代码引用 self.memory 的地方，使用 property 代理当前活动会话
-    # 注意：在多线程环境中请尽量使用 get_memory(session_id) 明确指定
     @property
     def memory(self):
         return self.get_memory(self.active_session_id)
@@ -143,7 +145,28 @@ class HostAgent:
             print(f"[LLM Error]: Failed to initialize OpenAI client: {e}")
             # 即使失败，也定义为 None，防止 AttributeError，并在 chat 中处理
             self.client = None
+    def activate_skill(self, skill_name):
+        """
+        [State Change] 激活一个技能 (Activation Phase)。
+        1. 检查是否存在。
+        2. 设置 self.active_skill。
+        3. 下一次 _build_dynamic_system_prompt 时会注入 SOP。
+        """
+        # 尝试加载 SOP 以验证技能是否存在
+        sop_text, _ = self.skill_manager.load_skill_context(skill_name)
+        if not sop_text:
+            return f"Error: Skill '{skill_name}' not found or failed to load."
+        
+        self.active_skill = skill_name
+        return f"SUCCESS: Skill '{skill_name}' activated. SOP instructions loaded. Exclusive tools are now visible."
 
+    def deactivate_skill(self):
+        """
+        [State Change] 退出技能模式，回到通用模式。
+        """
+        prev_skill = self.active_skill
+        self.active_skill = None
+        return f"Skill '{prev_skill}' deactivated. Returned to General Mode."
 
     def _build_dynamic_system_prompt(self, relevant_memories: list, memory_instance: ConversationMemory):
         """
@@ -163,6 +186,11 @@ Core Principles:
 4. **Robustness.** If a command fails, analyze the error and try a different approach.
 5. **Memory.** You have access to long-term memory. Use it to recall user preferences and past projects.
 6. **Autonomy (Sentinels).** You have a 'Sentinel System'. You can set triggers of Time, File, Behavior to wake yourself up later. Use this to be proactive.
+7. **Anthropics Skills.**    
+    - You have a 'Skill Index'. DO NOT hallucinate tools. 
+   - To use a specialized capability (e.g., advanced coding, browser auto), you MUST use 'manage_skills' to ACTIVATE it first.
+   - Once a skill is active, you will receive its SOP (Standard Operating Procedure). Follow it RIGIDLY.
+
 
 Tool Use Reminders:
 You have a limit on how many tools you can use in one session. Use them wisely.
@@ -181,6 +209,24 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
         for proj, path in known_projects.items():
             user_section += f"  * {proj}: {path}\n"
 
+        # --- [关键修改] JIT SOP 注入 ---
+        skill_section = ""
+        if self.active_skill:
+            # 只有当 Skill 激活时，才加载 SOP (减少 Token，防止污染)
+            sop_text, _ = self.skill_manager.load_skill_context(self.active_skill)
+            if sop_text:
+                skill_section = f"\n\n[🔥 ACTIVE SKILL CONTEXT: {self.active_skill}]\n"
+                skill_section += "!!! CRITICAL: You are now executing a specialized skill. !!!\n"
+                skill_section += "!!! IGNORE general rules if they conflict with the SOP below. !!!\n"
+                skill_section += "================ SKILL SOP START ================\n"
+                skill_section += sop_text
+                skill_section += "\n================ SKILL SOP END ==================\n"
+                skill_section += "INSTRUCTION: Perform the task using the specific tools provided above. Validate results as per SOP.\n"
+        else:
+            # 未激活时，提示可用技能索引 (Discovery Phase)
+            skill_index = self.skill_manager.get_skill_index()
+            skill_section = f"\n[Available Skills Index]\n(Use 'manage_skills' to activate one if needed)\n{skill_index}\n"
+
         # 3. 长期记忆注入 (RAG Results)
         rag_section = ""
         if relevant_memories:
@@ -193,10 +239,10 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
         summary_text = memory_instance.load_summary()
         summary_section = ""
         if summary_text:
-            summary_section = f"\n[Previous Conversation Summary]\n{summary_text}\n(This is what happened before the current active window)\n"
+            summary_section = f"\n[Previous Conversation Summary]\n{summary_text}\n(This is what happened before the current chat window)\n"
 
         # 组合 Prompt
-        full_prompt = base_identity + user_section + rag_section + summary_section
+        full_prompt = base_identity + user_section + skill_section + rag_section + summary_section
         
         return full_prompt
 
@@ -457,18 +503,21 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
 
                     current_iteration += 1
                     
-                    # 每一轮推理都重新从 memory 获取经清洗后的上下文
-                    messages = [{"role": "system", "content": dynamic_sys_prompt}]
-                    messages += session_memory.get_active_context() 
+                    # 每次循环都更新 Prompt (因为 active_skill 可能在工具调用中改变)
+                    dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory)
+                    messages = [{"role": "system", "content": dynamic_sys_prompt}] + session_memory.get_active_context()
 
                     yield {"type": "status", "content": f"Thinking (Step {current_iteration}/{MAX_TOOL_ITERATIONS})..."}
 
                     # 调用 OpenAI Stream
                     try:
+                        # [动态工具列表]
+                        current_tools = self.toolbox.get_tool_definitions()
+                        
                         response = self.client.chat.completions.create(
                             model=self.current_model_config['model'],
                             messages=messages,
-                            tools=self.toolbox.get_tool_definitions(),
+                            tools=current_tools,
                             tool_choice="auto",
                             temperature=self.current_model_config['temperature'],
                             stream=True
@@ -631,7 +680,11 @@ Proceed with the next step immediately.
             if stop_event and stop_event.is_set():
                 return "[System]: Tool execution cancelled by user."
 
-            # 1. 技能学习
+            # 1. Manage Skills
+            if function_name == "manage_skills":
+                return self.toolbox.manage_skills(args.get("action"), args.get("skill_name"))
+            
+            # 2. Learn Skills
             if function_name == "learn_new_skill":
                 return self.toolbox.learn_new_skill(args.get("url_or_path"))
 
@@ -711,6 +764,9 @@ Proceed with the next step immediately.
             elif function_name == "remove_sentinel":
                 return self.toolbox.remove_sentinel(args.get("type"), args.get("id"))
 
+            skill_result = self.toolbox.route_skill_tool(function_name, args)
+            if skill_result is not None:
+                return skill_result
             else:
                 return f"Error: Unknown tool '{function_name}'"
         except Exception as e:

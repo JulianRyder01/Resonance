@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Toaster, toast } from 'sonner';
 import { 
   Terminal, Shield, Activity, Database, Settings, 
-  Zap, Wifi, WifiOff 
+  Zap, Wifi, WifiOff, Package // [新增] Package icon
 } from 'lucide-react';
 
 import ChatInterface from './components/ChatInterface';
@@ -11,6 +11,7 @@ import SentinelDashboard from './components/SentinelDashboard';
 import SystemMonitor from './components/SystemMonitor';
 import MemoryManager from './components/MemoryManager';
 import ModelConfig from './components/ModelConfig';
+import SkillStore from './components/SkillStore'; // [新增]
 
 const WS_URL = "ws://localhost:8000/ws/chat";
 const HEARTBEAT_INTERVAL = 30000; // 30秒一次心跳
@@ -159,6 +160,10 @@ function App() {
 
           <nav className="space-y-1">
             <NavItem active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} icon={Terminal} label="Chat Console" />
+            
+            {/* [新增] Skill Store 导航 */}
+            <NavItem active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} icon={Package} label="Skill Store" />
+            
             <NavItem active={activeTab === 'sentinel'} onClick={() => setActiveTab('sentinel')} icon={Shield} label="Sentinel System" />
             <NavItem active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={Database} label="Memory Core" />
             <NavItem active={activeTab === 'monitor'} onClick={() => setActiveTab('monitor')} icon={Activity} label="System Monitor" />
@@ -195,6 +200,7 @@ function App() {
         
         <div className="flex-1 z-10 overflow-hidden relative">
         {activeTab === 'chat' && <ChatInterface ws={ws} isConnected={isConnected} />}
+          {activeTab === 'skills' && <SkillStore />} {/* [新增] */}
         {activeTab === 'sentinel' && <SentinelDashboard />}
         {activeTab === 'monitor' && <SystemMonitor />}
           {activeTab === 'memory' && <MemoryManager />}

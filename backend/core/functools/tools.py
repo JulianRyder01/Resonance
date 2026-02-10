@@ -1,6 +1,7 @@
 # core/functools/tools.py
 # [修改说明] 修复了Windows下subprocess读取输出时的UnicodeDecodeError (GBK编码崩溃)
 # [修改说明] 增强了 execute_shell 的鲁棒性，采用“混合解码”策略
+# [修改说明] 集成 SkillManager 实现动态工具列表
 import os
 import sys
 import subprocess
@@ -22,13 +23,10 @@ class Toolbox:
     def get_tool_definitions(self):
         """
         获取传递给 LLM 的 tools 定义 (JSON Schema)
-        [优化] 为每个工具增加了详细的用法指导和 Context，特别是哨兵系统。
+        [优化] 动态合并：Native Tools + Config Scripts + Imported Skills
         """
-        # 动态获取当前可用脚本以生成描述
-        available_scripts = self.agent.config.get('scripts', {})
-        scripts_desc = ", ".join([f"'{k}' ({v.get('description', '')})" for k, v in available_scripts.items()])
-
-        return [
+        # 1. 基础内置工具
+        tools = [
             # --- 核心能力 ---
             {
                 "type": "function",
@@ -64,181 +62,148 @@ class Toolbox:
                     }
                 }
             },
-
-            # 工具 1: 运行预定义技能 (Invoke Skill)
+            
+            # --- [新增] 技能学习能力 ---
             {
                 "type": "function",
                 "function": {
-                    "name": "invoke_skill",
-                    "description": f"Execute a pre-registered automation skill (script). PRIORITIZE this over raw shell commands if a matching skill exists. Available skills: {scripts_desc}",
+                    "name": "learn_new_skill",
+                    "description": "Dynamically learn a new skill from a GitHub URL or local path. Use this when the user asks you to 'learn' something or provides a link to an MCP tool/python script.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "skill_alias": {
+                            "url_or_path": {
                                 "type": "string",
-                                "description": "The exact alias name of the skill to run."
-                            },
-                            "args": {
-                                "type": "string",
-                                "description": "Optional arguments/parameters to pass to the skill. e.g. '--target 127.0.0.1'"
+                                "description": "The GitHub URL (starts with http) or absolute local file path to the skill folder."
                             }
                         },
-                        "required": ["skill_alias"]
-                    }
-                }
-            },
-            # 工具 2: 通用 Shell
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_shell_command",
-                    "description": "Execute a raw Windows PowerShell command. Use this for general tasks, installing pip packages, or running python scripts.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "The PowerShell command string."
-                            }
-                        },
-                        "required": ["command"]
-                    }
-                }
-            },
-            # 工具 3: 注册新技能
-            {
-                "type": "function",
-                "function": {
-                    "name": "add_automation_skill",
-                    "description": "Register a NEW reusable Skill/Tool to the system for future use.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "alias": {"type": "string", "description": "Short unique name (e.g., 'backup_docs')."},
-                            "command": {"type": "string", "description": "The full PowerShell command."},
-                            "description": {"type": "string", "description": "What this skill does."}
-                        },
-                        "required": ["alias", "command", "description"]
-                    }
-                }
-            },
-            # 工具 4: 记忆项目路径
-            {
-                "type": "function",
-                "function": {
-                    "name": "scan_directory_projects",
-                    "description": "Scan a folder to find and remember user projects (Top-level folders only). Updates Long-term Memory.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "Full Windows path to scan."}
-                        },
-                        "required": ["path"]
+                        "required": ["url_or_path"]
                     }
                 }
             },
 
-            # 工具 5: 记忆通用事实
-            {
-                "type": "function",
-                "function": {
-                    "name": "remember_user_fact",
-                    "description": "Save a fact about the user or system to long-term memory.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "key": {"type": "string", "description": "Category (e.g., 'name', 'ssh_key_path')."},
-                            "value": {"type": "string", "description": "The information to save."}
-                        },
-                        "required": ["key", "value"]
-                    }
-                }
-            },
-            
-            # ---------------------------------------------------------------------
-            # [新增工具 / 修改工具] 增强文件系统能力
-            # ---------------------------------------------------------------------
-            
-            # 工具: 递归列出文件 (File Explorer Awareness)
+            # --- 文件系统能力 ---
             {
                 "type": "function",
                 "function": {
                     "name": "list_directory_files",
-                    "description": "List files in a directory recursively. Use this to understand project structure or find specific files when you don't know the exact name. It filters out binary/hidden files automatically.",
+                    "description": "List files in a directory recursively. Use this to understand project structure or find specific files.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "directory_path": {
-                                "type": "string",
-                                "description": "The absolute path to the directory."
-                            },
-                            "recursive": {
-                                "type": "boolean",
-                                "description": "Whether to list subdirectories. Default is True."
-                            },
-                            "depth": {
-                                "type": "integer", 
-                                "description": "Max recursion depth. Default is 2 to prevent token overflow."
-                            }
+                            "directory_path": {"type": "string", "description": "The absolute path."},
+                            "recursive": {"type": "boolean", "description": "Default True."},
+                            "depth": {"type": "integer", "description": "Max depth (default 2)."}
                         },
                         "required": ["directory_path"]
                     }
                 }
             },
-
-            # 工具: 搜索文件内容 (Grep Capability)
             {
                 "type": "function",
                 "function": {
                     "name": "search_files_by_keyword",
-                    "description": "Search for a text keyword INSIDE files within a directory. Useful when looking for specific information (e.g. 'research', 'todo') but you don't know which file contains it.",
+                    "description": "Grep search inside files.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "directory_path": {
-                                "type": "string", 
-                                "description": "Directory to search in."
-                            },
-                            "keyword": {
-                                "type": "string", 
-                                "description": "The text to search for."
-                            }
+                            "directory_path": {"type": "string"},
+                            "keyword": {"type": "string"}
                         },
                         "required": ["directory_path", "keyword"]
                     }
                 }
             },
-
-            # 工具: 读取文件 (增强描述)
             {
                 "type": "function",
                 "function": {
                     "name": "read_file_content",
-                    "description": "Read the full text content of a specific file. Use this AFTER finding interesting files via 'list_directory_files' or 'search_files_by_keyword'.",
+                    "description": "Read text content of a file.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "The absolute path of the file to read."}
+                            "file_path": {"type": "string"}
                         },
                         "required": ["file_path"]
                     }
                 }
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_shell_command",
+                    "description": "Execute a raw Windows PowerShell command. Use cautiously.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            },
+            
+            # --- 记忆与配置 ---
+            {
+                "type": "function",
+                "function": {
+                    "name": "remember_user_fact",
+                    "description": "Save a fact to long-term memory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"},
+                            "value": {"type": "string"}
+                        },
+                        "required": ["key", "value"]
+                    }
+                }
+            }
+        ]
 
-            # ---------------------------------------------------------------------
-            # [新增工具] 哨兵系统 (Sentinel System)
-            # ---------------------------------------------------------------------
+        # 2. 动态加载 Legacy Scripts (config.yaml)
+        available_scripts = self.agent.config.get('scripts', {})
+        if available_scripts:
+            scripts_desc = ", ".join([f"'{k}' ({v.get('description', '')})" for k, v in available_scripts.items()])
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "invoke_legacy_script",
+                    "description": f"Execute a pre-registered legacy automation script. Available: {scripts_desc}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "alias": {"type": "string", "description": "The exact script alias name."},
+                            "args": {"type": "string", "description": "Optional arguments."}
+                        },
+                        "required": ["alias"]
+                    }
+                }
+            })
+
+        # 3. [关键修改] 动态加载 Imported Skills (from SkillManager)
+        if hasattr(self.agent, 'skill_manager') and self.agent.skill_manager:
+            imported_tools = self.agent.skill_manager.get_tool_definitions_json()
+            tools.extend(imported_tools)
+
+        # 4. 哨兵系统工具
+        tools.extend(self._get_sentinel_tools())
+
+        return tools
+
+    def _get_sentinel_tools(self):
+        return [
             {
                 "type": "function",
                 "function": {
                     "name": "add_time_sentinel",
-                    "description": "Set a delayed trigger (Timer). Use this when the user says 'Remind me in 10 mins' or 'Check the download later'. When the time is up, the system will wake up and notify the user.",
+                    "description": "Set a timer trigger.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "interval": {"type": "integer", "description": "Numeric value (e.g. 30)."},
+                            "interval": {"type": "integer"},
                             "unit": {"type": "string", "enum": ["seconds", "minutes", "hours", "days"]},
-                            "description": {"type": "string", "description": "The message/task to execute when time is up."}
+                            "description": {"type": "string"}
                         },
                         "required": ["interval", "unit", "description"]
                     }
@@ -248,12 +213,12 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "add_file_sentinel",
-                    "description": "Monitor a specific file or folder for ANY changes (modify/delete/create). Use this when the user says 'Watch this file' or 'Tell me when the log updates'. Alerts represent real-time feedback.",
+                    "description": "Watch a file/folder for changes.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Absolute Windows path to watch."},
-                            "description": {"type": "string", "description": "Reason for watching (e.g. 'Alert if build log updates')."}
+                            "path": {"type": "string"},
+                            "description": {"type": "string"}
                         },
                         "required": ["path", "description"]
                     }
@@ -263,12 +228,12 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "add_behavior_sentinel",
-                    "description": "Register a global hotkey (keyboard shortcut). When pressed by the user, you will be woken up to perform an action.",
+                    "description": "Register global hotkey.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "key_combo": {"type": "string", "description": "Key combination (e.g. 'ctrl+shift+a', 'f9')."},
-                            "description": {"type": "string", "description": "What to do when this key is pressed."}
+                            "key_combo": {"type": "string"},
+                            "description": {"type": "string"}
                         },
                         "required": ["key_combo", "description"]
                     }
@@ -278,23 +243,20 @@ class Toolbox:
                 "type": "function",
                 "function": {
                     "name": "list_active_sentinels",
-                    "description": "List all currently active Sentinels (Time, File, Behavior).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                    }
+                    "description": "List sentinels.",
+                    "parameters": {"type": "object", "properties": {}}
                 }
             },
             {
                 "type": "function",
                 "function": {
                     "name": "remove_sentinel",
-                    "description": "Stop and remove a specific sentinel.",
+                    "description": "Remove sentinel.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string", "enum": ["time", "file", "behavior"]},
-                            "id": {"type": "string", "description": "The Sentinel ID found in 'list_active_sentinels'."}
+                            "type": {"type": "string"},
+                            "id": {"type": "string"}
                         },
                         "required": ["type", "id"]
                     }
@@ -304,27 +266,21 @@ class Toolbox:
 
     # --- 具体实现 ---
 
+    def learn_new_skill(self, url_or_path):
+        """
+        连接到 SkillManager 的学习方法
+        """
+        if not self.agent.skill_manager:
+            return "Error: Skill Manager is not initialized."
+        return self.agent.skill_manager.learn_skill(url_or_path)
+
     def _safe_decode(self, byte_data):
-        """
-        [新增] 安全解码函数：解决 Windows 终端 GBK 与 UTF-8 混杂导致的崩溃问题
-        """
-        if not byte_data:
-            return ""
-        
-        # 1. 优先尝试 UTF-8 (最通用)
-        try:
-            return byte_data.decode('utf-8')
-        except UnicodeDecodeError:
-            pass
-        
-        # 2. 尝试 GBK (Windows 默认)
-        try:
-            return byte_data.decode('gbk')
-        except UnicodeDecodeError:
-            pass
-        
-        # 3. 最后尝试忽略错误的 UTF-8
-        return byte_data.decode('utf-8', errors='ignore')
+        """安全解码函数"""
+        if not byte_data: return ""
+        try: return byte_data.decode('utf-8')
+        except: 
+            try: return byte_data.decode('gbk')
+            except: return byte_data.decode('utf-8', errors='ignore')
 
     def execute_shell(self, command, cwd=None, timeout=120, stop_event=None):
         """
@@ -393,18 +349,17 @@ class Toolbox:
         except Exception as e:
             return f"[System Error]: {str(e)}"
 
-    def invoke_registered_skill(self, skill_alias, args_str="", stop_event=None):
-        """运行 Config 中预定义的技能"""
+    def invoke_registered_skill(self, alias, args_str="", stop_event=None):
+        """运行 Config 中预定义的 Legacy Scripts"""
         scripts = self.agent.config.get('scripts', {})
+        if alias not in scripts:
+            return f"Error: Legacy Script '{alias}' not found."
         
-        if skill_alias not in scripts:
-            return f"Error: Skill '{skill_alias}' not found in configuration."
-        
-        script_info = scripts[skill_alias]
+        script_info = scripts[alias]
         base_command = script_info.get('command')
         cwd = script_info.get('cwd', None)
         
-        # [修改点] 修复产物堆积问题：如果 cwd 为空，强制使用 ./logs/workspace
+        # 修复产物堆积问题：如果 cwd 为空，强制使用 ./logs/workspace
         if not cwd:
             # 获取日志目录，默认为 ./logs
             log_dir = self.agent.config.get('system', {}).get('log_dir', './logs')
@@ -606,23 +561,6 @@ class Toolbox:
         result_text += "\n(You can now use 'read_file_content' to read specific files from this list.)"
         return result_text
 
-    def add_new_script(self, alias, command, description):
-        """动态添加新工具到 config"""
-        try:
-            current_scripts = self.agent.config.get('scripts', {})
-            current_scripts[alias] = {
-                "command": command,
-                "description": description,
-                "cwd": None,
-                "timeout": 120,
-                "delay": 0
-            }
-            self.agent.config['scripts'] = current_scripts
-            self.agent.update_config(new_config=self.agent.config)
-            return f"Success: New Skill '{alias}' added. I can now use it to: {description}"
-        except Exception as e:
-            return f"Error adding script: {e}"
-
     def scan_and_remember(self, target_path, scan_type="projects"):
         """扫描文件夹并记忆路径"""
         try:
@@ -697,25 +635,29 @@ class Toolbox:
         
         return f"Title: {data['title']}\nURL: {data['url']}\n\n[Page Content]:\n{data['content']}"
 
-    # --- 哨兵系统方法 ---
+    def sentinel_proxy(self, func_name, kwargs):
+        """哨兵系统代理"""
+        engine = self.agent.sentinel_engine
+        if func_name == "add_time_sentinel":
+            return engine.add_time_sentinel(kwargs['interval'], kwargs['unit'], kwargs['description'])
+        elif func_name == "add_file_sentinel":
+            return engine.add_file_sentinel(kwargs['path'], kwargs['description'])
+        elif func_name == "add_behavior_sentinel":
+            return engine.add_behavior_sentinel(kwargs['key_combo'], kwargs['description'])
+        elif func_name == "list_active_sentinels":
+            return json.dumps(engine.list_sentinels(), indent=2)
+        elif func_name == "remove_sentinel":
+            return str(engine.remove_sentinel(kwargs['type'], kwargs['id']))
+        return "Unknown sentinel command"
+    
+    # 增加直接访问方法供 router 调用
     def add_time_sentinel(self, interval, unit, description):
-        s_id = self.agent.sentinel_engine.add_time_sentinel(interval, unit, description)
-        return f"✅ Time Sentinel Set! (ID: {s_id})\nI will trigger every {interval} {unit} to: {description}"
-
+        return self.agent.sentinel_engine.add_time_sentinel(interval, unit, description)
     def add_file_sentinel(self, path, description):
-        s_id = self.agent.sentinel_engine.add_file_sentinel(path, description)
-        if "Error" in str(s_id): return s_id
-        return f"✅ File Sentinel Set! (ID: {s_id})\nWatching: {path}\nReason: {description}"
-
+        return self.agent.sentinel_engine.add_file_sentinel(path, description)
     def add_behavior_sentinel(self, key_combo, description):
-        s_id = self.agent.sentinel_engine.add_behavior_sentinel(key_combo, description)
-        return f"✅ Behavior Sentinel Set! (ID: {s_id})\nHotkey: {key_combo}\nAction: {description}"
-
+        return self.agent.sentinel_engine.add_behavior_sentinel(key_combo, description)
     def list_sentinels(self):
-        data = self.agent.sentinel_engine.list_sentinels()
-        return json.dumps(data, indent=2, ensure_ascii=False)
-
-    def remove_sentinel(self, s_type, s_id):
-        if self.agent.sentinel_engine.remove_sentinel(s_type, s_id):
-            return f"Sentinel {s_id} removed."
-        return "Error: Sentinel not found."
+        return self.agent.sentinel_engine.list_sentinels()
+    def remove_sentinel(self, type, id):
+        return self.agent.sentinel_engine.remove_sentinel(type, id)

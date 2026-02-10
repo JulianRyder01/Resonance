@@ -28,6 +28,9 @@ from utils.monitor import SystemMonitor
 class RAGConfigUpdate(BaseModel):
     strategy: str # 'semantic' or 'hybrid_time'
 
+class SkillLearnRequest(BaseModel):
+    url_or_path: str
+
 # --- 配置日志 ---
 logging.basicConfig(
     level=logging.INFO,
@@ -461,6 +464,50 @@ async def get_system_processes():
 async def get_disk_status():
     return SystemMonitor.get_disk_usage()
 
+# --- SKILL MANAGEMENT APIs ---
+
+@app.get("/api/skills/list")
+async def list_skills():
+    """获取所有技能（包括内置 Scripts 和 导入的 Skills）"""
+    # Legacy scripts
+    legacy = state.agent.config.get('scripts', {})
+    
+    # Imported skills from config
+    imported = state.agent.config.get('imported_skills', {})
+    
+    return {
+        "legacy": legacy,
+        "imported": imported
+    }
+
+@app.post("/api/skills/learn")
+async def learn_skill_endpoint(payload: SkillLearnRequest):
+    """
+    触发 AI 学习新技能。这是一个可能耗时的操作，为了不阻塞主线程，放到 executor 中运行。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            state.executor, 
+            state.agent.skill_manager.learn_skill, 
+            payload.url_or_path
+        )
+        return {"status": "success", "result": result}
+    except Exception as e:
+        logger.error(f"Skill learning failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/skills/{skill_name}")
+async def delete_skill(skill_name: str):
+    """删除已学习的技能"""
+    try:
+        success = state.agent.skill_manager.delete_skill(skill_name)
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return {"status": "deleted", "skill": skill_name}
+    except Exception as e:
+        logger.error(f"Delete skill failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- [核心修复] 全双工 WebSocket Chat Endpoint ---
 @app.websocket("/ws/chat")

@@ -4,6 +4,7 @@ import json
 import os
 import time
 import threading
+import traceback  # [修改] 引入 traceback 以便更好地处理错误
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from core.memory import ConversationMemory
 # [修改点] 导入解耦后的工具箱
@@ -11,6 +12,7 @@ from core.functools.tools import Toolbox
 from core.rag_store import RAGStore
 # [修改点] 导入 SentinelEngine
 from core.sentinel_engine import SentinelEngine
+from core.skill_manager import SkillManager  # [新增]
 
 class HostAgent:
     def __init__(self, default_session="resonance_main", config_path="config/config.yaml"):
@@ -57,12 +59,18 @@ class HostAgent:
         sentinel_config_path = os.path.join(backend_root, "config/sentinels.json")
         self.sentinel_engine = SentinelEngine(config_path=sentinel_config_path)
 
-        # 初始化工具箱 (传入 self 以便工具箱访问 stop_flag 和 config)
+        # [新增] 初始化 SkillManager
+        self.skill_manager = SkillManager(self)
+
+        # 工具箱
         self.toolbox = Toolbox(self)
         
         # 初始化 LLM Client
         self.client = None
         self._init_client()
+        self.interrupt_events = {}
+        self.active_session_id = default_session
+        self.memory_cache = {}
 
 
     def get_memory(self, session_id=None) -> ConversationMemory:
@@ -155,6 +163,10 @@ Core Principles:
 4. **Robustness.** If a command fails, analyze the error and try a different approach.
 5. **Memory.** You have access to long-term memory. Use it to recall user preferences and past projects.
 6. **Autonomy (Sentinels).** You have a 'Sentinel System'. You can set triggers of Time, File, Behavior to wake yourself up later. Use this to be proactive.
+
+Tool Use Reminders:
+You have a limit on how many tools you can use in one session. Use them wisely.
+If you hit the limit, you will be given a chance to reflect and continue if necessary.
 """
         
         # 2. 用户画像注入
@@ -322,9 +334,59 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
         except Exception as e:
             print(f"[Core Error] Failed to inject sentinel memory: {e}")
 
+    # =========================================================================
+    # [重构] 智能重试与自动继续的核心逻辑
+    # =========================================================================
+    
+    def _autonomous_reflection(self, user_input, session_memory):
+        """
+        [新增] 模型反思环节
+        当工具调用次数达到上限时，模型思考是否需要继续。
+        """
+        print("[System]: Triggering Autonomous Reflection...")
+        
+        reflection_prompt = f"""
+[SYSTEM AUTONOMOUS CHECK]
+You have reached the maximum tool execution limit for the current batch.
+
+User's Original Request: "{user_input}"
+
+Review your progress based on the conversation history above.
+1. Have you substantially completed the request?
+2. Is there a critical next step required to finish?
+
+Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
+{{
+  "status": "CONTINUE" or "FINISH",
+  "reasoning": "Short explanation of your status."
+}}
+"""
+        try:
+            # 获取当前上下文
+            context = session_memory.get_active_context()
+            # 临时追加反思提示
+            messages = context + [{"role": "system", "content": reflection_prompt}]
+            
+            response = self.client.chat.completions.create(
+                model=self.current_model_config['model'],
+                messages=messages,
+                temperature=0.1,
+                response_format={"type": "json_object"} # 如果模型支持JSON模式
+            )
+            
+            content = response.choices[0].message.content
+            decision_data = json.loads(content)
+            
+            return decision_data
+        except Exception as e:
+            print(f"[Reflection Error]: {e}")
+            # 默认保守策略：结束
+            return {"status": "FINISH", "reasoning": "Error during reflection, stopping safely."}
+
     def chat(self, user_input, session_id="default"):
         """
         主交互逻辑 (Generator) - 线程安全版本
+        [修改] 增加了自动继续 (Auto-Continue) 和智能重试机制
         Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
         """
         # [并发安全] 初始化该会话的中断事件
@@ -373,154 +435,171 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             # 4. 进入 ReAct 循环
             # 用于萃取的全量日志记录（本轮对话）
             turn_log_for_extraction = f"User Input: {user_input}\n"
-            max_iterations = 24  # 防止模型陷入死循环
-            current_iteration = 0
-
-            while current_iteration < max_iterations:
-                # [修改点] 循环开始前检查打断
-                if stop_event.is_set():
-                    yield {"type": "status", "content": "⛔ Task Interrupted by User."}
-                    break
-
-                current_iteration += 1
-
-                # [关键修改]：每一轮推理都重新从 memory 获取经清洗后的上下文
-                # 不要相信上一个循环里的 messages 列表，因为它可能在打断后受损
-                messages = [{"role": "system", "content": dynamic_sys_prompt}]
-                messages += session_memory.get_active_context() 
-
-                yield {"type": "status", "content": f"Thinking (Step {current_iteration})..."}
-
-                # 调用 OpenAI Stream
-                # 注意：如果此处 OpenAI 响应非常慢，依然会有 IO 阻塞，但 Python 线程可以响应 event
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.current_model_config['model'],
-                        messages=messages,
-                        tools=self.toolbox.get_tool_definitions(),
-                        tool_choice="auto",
-                        temperature=self.current_model_config['temperature'],
-                        stream=True
-                    )
-                except Exception as e:
-                    yield {"type": "error", "content": f"LLM API Error: {str(e)}"}
-                    break
-
-                full_response_content = ""
-                tool_calls_buffer = {} # 用于收集流式的 tool_calls
-
-                # [修改点] 鲁棒性：Stream处理循环
-                try:
-                    for chunk in response:
-                        # [修改点] 实时流检查打断
-                        if stop_event.is_set():
-                            response.close() # 显式切断 API 连接
-                            yield {"type": "status", "content": "\n[Stopped]"}
-                            break 
-
-                        delta = chunk.choices[0].delta
-                        
-                        # [重要修复] 严格检查 content 且仅在有内容时 yield
-                        if hasattr(delta, 'content') and delta.content is not None:
-                            content_chunk = delta.content
-                            full_response_content += content_chunk
-                            yield {"type": "delta", "content": content_chunk}
-                        
-                        if delta.tool_calls:
-                            for tc_chunk in delta.tool_calls:
-                                idx = tc_chunk.index
-                                if idx not in tool_calls_buffer:
-                                    tool_calls_buffer[idx] = {
-                                        "id": tc_chunk.id,
-                                        "name": tc_chunk.function.name,
-                                        "arguments": ""
-                                    }
-                                if tc_chunk.function.arguments:
-                                    tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
-                except Exception as e:
-                    yield {"type": "error", "content": f"Stream context error: {str(e)}"}
-                    break
+            
+            # [新增] 限制常量
+            MAX_TOOL_ITERATIONS = 16  # 单次 Batch 最大工具调用次数
+            MAX_CONTINUATIONS = 3     # 允许自动继续的最大轮次
+            
+            continuation_count = 0
+            
+            # [修改] 外层循环：控制 "Continue/Retry" 的生命周期
+            while continuation_count <= MAX_CONTINUATIONS:
                 
-                # 如果是被打断跳出 for loop 的，这里 full_response_content 可能只有一半
-                # 我们依然记录它，避免下一次对话上下文丢失
+                # 内层循环计数器
+                current_iteration = 0
                 
-                if full_response_content:
-                    turn_log_for_extraction += f"AI Thought: {full_response_content}\n"
-
-                # [关键修改] 如果已经打断，直接退出外层循环
-                if stop_event.is_set():
-                    break
-
-                # 处理 Tool Calls
-                active_tool_calls = []
-                for _, tc_data in tool_calls_buffer.items():
-                    # 模拟 OpenAI 的对象结构供逻辑复用
-                    class Func:
-                        def __init__(self, n, a): self.name, self.arguments = n, a
-                    class TC:
-                        def __init__(self, i, f): self.id, self.function = i, f
-                    active_tool_calls.append(TC(tc_data["id"], Func(tc_data["name"], tc_data["arguments"])))
-
-                # 记录到内存 (模拟原有非流式逻辑的保存)
-                if active_tool_calls:
-                    session_memory.add_ai_tool_call(full_response_content, active_tool_calls)
-                    messages.append({
-                        "role": "assistant",
-                        "content": full_response_content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                            } for tc in active_tool_calls
-                        ]
-                    })
-                else:
-                    session_memory.add_ai_message(full_response_content)
-                    messages.append({"role": "assistant", "content": full_response_content})
-
-                # [修改点] 如果已经打断，且没有工具调用，直接退出外层循环
-                if stop_event.is_set():
-                    break
-
-                # C. 执行工具
-                if not active_tool_calls:
-                    break
-                
-                for tc in active_tool_calls:
-                    # [修改点] 工具执行前检查打断 - 立即停止即将发生的操作
+                # [修改] 内层 ReAct 循环
+                while current_iteration < MAX_TOOL_ITERATIONS:
+                    # 循环开始前检查打断
                     if stop_event.is_set():
-                        yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
-                        break
+                        yield {"type": "status", "content": "⛔ Task Interrupted by User."}
+                        return # 直接结束 generator
 
-                    # [修复点] 获取工具函数名，防止下文 func_name 未定义引用
-                    func_name = tc.function.name 
+                    current_iteration += 1
                     
+                    # 每一轮推理都重新从 memory 获取经清洗后的上下文
+                    messages = [{"role": "system", "content": dynamic_sys_prompt}]
+                    messages += session_memory.get_active_context() 
+
+                    yield {"type": "status", "content": f"Thinking (Step {current_iteration}/{MAX_TOOL_ITERATIONS})..."}
+
+                    # 调用 OpenAI Stream
                     try:
-                        args = json.loads(tc.function.arguments)
-                    except:
-                        args = {}
-                    
-                    yield {"type": "status", "content": f"Executing tool: {func_name}..."}
-                    
-                    # [关键修改] 将 stop_event 传递给工具路由，支持工具内部中断
-                    tool_result = self._route_tool_execution(func_name, args, stop_event)
-                    
-                    # 关键可视化：发送工具结果
-                    yield {"type": "tool", "name": func_name, "content": tool_result}
-                    
-                    # 持久化记录
-                    # 将工具结果也存入萃取日志
-                    turn_log_for_extraction += f"Tool Output ({func_name}): {str(tool_result)[:1000]}\n" # 截断过长的输出以节省Token
-                    
-                    session_memory.add_tool_message(tool_result, tc.id)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": func_name,
-                        "content": str(tool_result)
-                    })
+                        response = self.client.chat.completions.create(
+                            model=self.current_model_config['model'],
+                            messages=messages,
+                            tools=self.toolbox.get_tool_definitions(),
+                            tool_choice="auto",
+                            temperature=self.current_model_config['temperature'],
+                            stream=True
+                        )
+                    except Exception as e:
+                        yield {"type": "error", "content": f"LLM API Error: {str(e)}"}
+                        return # 发生API错误，停止
 
+                    full_response_content = ""
+                    tool_calls_buffer = {} # 用于收集流式的 tool_calls
+
+                    try:
+                        for chunk in response:
+                            if stop_event.is_set():
+                                response.close()
+                                yield {"type": "status", "content": "\n[Stopped]"}
+                                return 
+
+                            delta = chunk.choices[0].delta
+                            
+                            if hasattr(delta, 'content') and delta.content is not None:
+                                content_chunk = delta.content
+                                full_response_content += content_chunk
+                                yield {"type": "delta", "content": content_chunk}
+                            
+                            if delta.tool_calls:
+                                for tc_chunk in delta.tool_calls:
+                                    idx = tc_chunk.index
+                                    if idx not in tool_calls_buffer:
+                                        tool_calls_buffer[idx] = {
+                                            "id": tc_chunk.id,
+                                            "name": tc_chunk.function.name,
+                                            "arguments": ""
+                                        }
+                                    if tc_chunk.function.arguments:
+                                        tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
+                    except Exception as e:
+                        yield {"type": "error", "content": f"Stream context error: {str(e)}"}
+                        return
+                    
+                    if full_response_content:
+                        turn_log_for_extraction += f"AI Thought: {full_response_content}\n"
+
+                    # 检查打断
+                    if stop_event.is_set():
+                        return
+
+                    # 处理 Tool Calls
+                    active_tool_calls = []
+                    for _, tc_data in tool_calls_buffer.items():
+                        class Func:
+                            def __init__(self, n, a): self.name, self.arguments = n, a
+                        class TC:
+                            def __init__(self, i, f): self.id, self.function = i, f
+                        active_tool_calls.append(TC(tc_data["id"], Func(tc_data["name"], tc_data["arguments"])))
+
+                    # 记录 AI 消息到内存
+                    if active_tool_calls:
+                        session_memory.add_ai_tool_call(full_response_content, active_tool_calls)
+                    else:
+                        session_memory.add_ai_message(full_response_content)
+                        # 如果没有工具调用，说明 AI 输出了最终回复，结束当前 turn
+                        # 但如果是自动继续的中间状态，这里 break 只会结束内层循环，外层循环需要判断
+                        # 这是一个正常的对话结束点，我们退出整个 chat 函数
+                        self._update_summary_if_needed(session_memory)
+                        # 启动异步线程进行记忆萃取
+                        threading.Thread(target=self._extract_and_save_memory_async, args=(turn_log_for_extraction, session_id), daemon=True).start()
+                        return 
+
+                    # 执行工具
+                    for tc in active_tool_calls:
+                        if stop_event.is_set():
+                            yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
+                            return
+
+                        func_name = tc.function.name 
+                        try:
+                            args = json.loads(tc.function.arguments)
+                        except:
+                            args = {}
+                        
+                        yield {"type": "status", "content": f"Executing: {func_name} ({current_iteration}/{MAX_TOOL_ITERATIONS})"}
+                        
+                        # 执行工具
+                        tool_result_raw = self._route_tool_execution(func_name, args, stop_event)
+                        
+                        # [关键修改] 在工具结果中追加当前次数限制信息，供模型参考
+                        tool_result = f"{str(tool_result_raw)}\n\n[System Info: Tool Use Count: {current_iteration}/{MAX_TOOL_ITERATIONS}]"
+                        
+                        yield {"type": "tool", "name": func_name, "content": tool_result_raw} # UI 显示原始结果，不带 System Info
+                        
+                        turn_log_for_extraction += f"Tool Output ({func_name}): {str(tool_result)[:1000]}\n"
+                        
+                        session_memory.add_tool_message(tool_result, tc.id)
+
+                # --- 内层循环结束 (达到 MAX_TOOL_ITERATIONS) ---
+                
+                # 检查是否允许继续
+                if continuation_count >= MAX_CONTINUATIONS:
+                    yield {"type": "status", "content": "⚠️ Maximum auto-continuations reached. Stopping to prevent infinite loops."}
+                    session_memory.add_system_message("System: Max continuation limit reached. Please provide a final summary.")
+                    # 此时不 return，而是让模型最后一次机会做总结
+                    break 
+
+                # [核心逻辑] 智能反思：是否需要继续？
+                yield {"type": "status", "content": "⏳ Limit reached. Reflecting on progress..."}
+                decision = self._autonomous_reflection(user_input, session_memory)
+                
+                if decision.get("status") == "CONTINUE":
+                    continuation_count += 1
+                    # [Anthropic 最佳实践] 注入锚点，防止模型遗忘最初任务
+                    anchor_message = f"""
+[System]: Tool execution limit reached for this batch. Counter reset (0/{MAX_TOOL_ITERATIONS}).
+Auto-Continue initiated ({continuation_count}/{MAX_CONTINUATIONS}).
+
+CRITICAL REMINDER - Your Original Objective:
+"{user_input}"
+
+Reasoning for continuation: {decision.get('reasoning', 'Task incomplete')}
+Proceed with the next step immediately.
+"""
+                    session_memory.add_system_message(anchor_message)
+                    yield {"type": "status", "content": f"🔄 Auto-Continuing: {decision.get('reasoning')}"}
+                    # 重新开始内层循环
+                    continue 
+                else:
+                    # 模型认为任务结束或不需要继续
+                    yield {"type": "status", "content": "✅ Task reflection complete. Finishing."}
+                    break
+
+            # 最终收尾
             self._update_summary_if_needed(session_memory)
             
             # 8. [修改点] 启动异步线程进行记忆萃取与向量存储
@@ -534,7 +613,6 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
 
 
         except Exception as e:
-            import traceback
             error_details = traceback.format_exc()
             print(error_details) # 在控制台打印详细堆栈
             yield {"type": "error", "content": str(error_details)}
@@ -547,19 +625,29 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
     def _route_tool_execution(self, function_name, args, stop_event=None):
         """
         路由工具调用到 Toolbox
-        [新增] stop_event 参数，传递给支持中断的工具
         """
         try:
             # 检查是否有高优先级的打断
             if stop_event and stop_event.is_set():
                 return "[System]: Tool execution cancelled by user."
 
-            if function_name in ["invoke_skill", "run_registered_script"]:
-                alias = args.get("skill_alias") or args.get("script_alias")
-                extra = args.get("args", "")
-                # 传递 stop_event
-                return self.toolbox.invoke_registered_skill(alias, extra, stop_event)
-                
+            # 1. 技能学习
+            if function_name == "learn_new_skill":
+                return self.toolbox.learn_new_skill(args.get("url_or_path"))
+
+            # 2. 动态导入的技能 (skill_*)
+            if function_name.startswith("skill_"):
+                # 注意：skill_manager 可能在初始化时没准备好，增加防护
+                if self.skill_manager:
+                    return self.skill_manager.execute_skill(function_name, args)
+                else:
+                    return "Error: Skill Manager not initialized."
+
+            # 3. 遗留脚本
+            if function_name == "invoke_legacy_script":
+                return self.toolbox.invoke_registered_skill(args.get("alias"), args.get("args", ""), stop_event)
+
+
             elif function_name == "execute_shell_command":
                 return self.toolbox.execute_shell(args.get("command"), stop_event=stop_event)
                 
@@ -591,8 +679,10 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                     keyword=args.get("keyword"),
                     stop_event=stop_event
                 )
-            
-            # [修改点] 增加联网工具路由
+            elif function_name == "read_file_content":
+                return self.toolbox.read_file_content(args.get("file_path"))
+            elif function_name == "remember_user_fact":
+                return self.toolbox.remember_user_fact(args.get("key"), args.get("value"))
             elif function_name == "internet_search":
                 return self.toolbox.run_internet_search(args.get("query"))
             

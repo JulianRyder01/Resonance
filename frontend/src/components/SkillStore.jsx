@@ -67,7 +67,8 @@ export default function SkillStore() {
   };
 
   return (
-    <div className="p-8 max-w-6xl mx-auto h-full flex flex-col">
+    // 增加 h-full overflow-y-auto 确保可滚动
+    <div className="p-8 max-w-6xl mx-auto h-full flex flex-col overflow-y-auto">
       <header className="flex justify-between items-end mb-8 shrink-0">
         <div>
           <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
@@ -111,7 +112,7 @@ export default function SkillStore() {
       </div>
 
       {/* Skills Grid */}
-      <div className="flex-1 overflow-y-auto pr-2">
+      <div className="flex-1 pr-2">
         
         {/* Imported Skills */}
         <div className="mb-8">
@@ -128,7 +129,8 @@ export default function SkillStore() {
                     <div className="p-2 bg-purple-50 text-purple-600 rounded-lg">
                       <Code size={20} />
                     </div>
-                    {data.source?.startsWith("http") ? (
+                    {/* 根据 Source 显示不同 Badge */}
+                    {data.source === 'git' || (data.path && data.path.includes('.git')) ? (
                         <div className="flex items-center gap-1 text-[10px] bg-slate-100 px-2 py-1 rounded text-slate-500 font-mono">
                             <GitBranch size={10} /> Git
                         </div>

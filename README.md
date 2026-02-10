@@ -3,6 +3,8 @@
 **Echoing Intelligence Locally.**  
 一个专为 Windows 打造的高级本地智能体 (AI Agent) 主机。它不仅仅是聊天机器人，更是连接大模型（本地/云端）与系统底层的桥梁。
 
+**支持 Claude Agent Skills，您可以导入任何您所想要的 SKills 立刻体验！只需把链接发给Resonance，或在配置中添加即可。**
+
 ![Python](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi)
 ![React](https://img.shields.io/badge/Frontend-React_19-61DAFB?logo=react)
 ![Tailwind](https://img.shields.io/badge/CSS-Tailwind_v4-38B2AC?logo=tailwindcss)
@@ -95,6 +97,9 @@ npm run dev
 - [ ] 前端集成全局日志查看器
 - [ ] 支持拖拽文件直接让 Agent 分析
 - [ ] 完善可一键运行的打包版本 (PyInstaller + Vite Build)
+- [ ] 修复打开Memory Core就会阻塞线程导致其他选项全部卡死的问题
+- [ ] 修复Memory Core几大显示的问题，比如cpu占用率不对且只有C盘
+- [ ] i18n
 
 ---
 

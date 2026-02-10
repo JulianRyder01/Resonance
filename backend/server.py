@@ -109,6 +109,8 @@ class ProfileUpdate(BaseModel):
     base_url: Optional[str] = None
     model: str
     temperature: float = 0.7
+    name: Optional[str] = None # Added name field for UI display
+    provider: str = "openai"   # Added provider field
 
 class ActiveProfileUpdate(BaseModel):
     profile_id: str
@@ -313,9 +315,62 @@ async def set_rag_config(update: RAGConfigUpdate):
     return {"status": "updated", "strategy": update.strategy}
 
 
-@app.get("/api/skills")
-async def get_skills():
-    return state.agent.config.get('scripts', {})
+# --- [修复] SKILLS MANAGEMENT APIs ---
+
+@app.get("/api/skills/list")
+async def list_skills():
+    """获取所有技能（包括内置 Scripts 和 导入的 Skills）"""
+    # 1. 获取 Legacy scripts (Config.yaml)
+    legacy = state.agent.config.get('scripts', {})
+    
+    # 2. [修复点] 获取真实加载的技能注册表 (SkillManager Registry)
+    # 不再依赖 config['imported_skills']，而是直接读取 SkillManager 扫描到的内容
+    registry = state.agent.skill_manager.skill_registry
+    
+    # 转换为前端友好的格式
+    imported = {}
+    for name, data in registry.items():
+        meta = data.get('metadata', {})
+        imported[name] = {
+            "description": data.get('description', 'No description'),
+            "source": meta.get('source', 'local'), # 前端可能用到，默认 local
+            "path": data.get('path'),
+            "commands": data.get('metadata', {}).get('commands', [])
+        }
+    
+    return {
+        "legacy": legacy,
+        "imported": imported
+    }
+
+@app.post("/api/skills/learn")
+async def learn_skill_endpoint(payload: SkillLearnRequest):
+    """
+    触发 AI 学习新技能。这是一个可能耗时的操作，为了不阻塞主线程，放到 executor 中运行。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            state.executor, 
+            state.agent.skill_manager.learn_skill, 
+            payload.url_or_path
+        )
+        return {"status": "success", "result": result}
+    except Exception as e:
+        logger.error(f"Skill learning failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/skills/{skill_name}")
+async def delete_skill(skill_name: str):
+    """删除已学习的技能"""
+    try:
+        success = state.agent.skill_manager.delete_skill(skill_name)
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return {"status": "deleted", "skill": skill_name}
+    except Exception as e:
+        logger.error(f"Delete skill failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # [修改点] 获取特定会话的历史记录
 @app.get("/api/history")
@@ -451,17 +506,61 @@ async def set_active_profile(update: ActiveProfileUpdate):
     state.agent.update_config(new_active_profile=update.profile_id)
     return {"status": "updated", "active_profile": update.profile_id}
 
+# [新增] 保存/新建 Profile 接口
+@app.post("/api/config/profiles/save")
+async def save_profile(profile: ProfileUpdate):
+    """新增或修改模型 Profile"""
+    # 1. 获取当前 Profiles
+    current_profiles = state.agent.profiles
+    
+    # 2. 更新或插入
+    profile_data = {
+        "name": profile.name or profile.profile_id,
+        "api_key": profile.api_key,
+        "base_url": profile.base_url,
+        "model": profile.model,
+        "temperature": profile.temperature,
+        "provider": profile.provider
+    }
+    
+    current_profiles[profile.profile_id] = profile_data
+    
+    # 3. 持久化
+    state.agent.update_config(new_profiles=current_profiles)
+    
+    return {"status": "success", "profile_id": profile.profile_id}
+
+# [新增] 删除 Profile 接口
+@app.delete("/api/config/profiles/{profile_id}")
+async def delete_profile(profile_id: str):
+    """删除模型 Profile"""
+    if profile_id not in state.agent.profiles:
+        raise HTTPException(status_code=404, detail="Profile not found")
+        
+    if profile_id == state.agent.config.get('active_profile'):
+        raise HTTPException(status_code=400, detail="Cannot delete active profile. Switch first.")
+    
+    current_profiles = state.agent.profiles
+    del current_profiles[profile_id]
+    
+    state.agent.update_config(new_profiles=current_profiles)
+    return {"status": "deleted"}
+
+
 @app.get("/api/system/metrics")
 async def get_system_metrics():
+    """获取实时 CPU、内存、电池指标"""
     return SystemMonitor.get_system_metrics()
 
 @app.get("/api/system/processes")
 async def get_system_processes():
+    """获取占用资源最高的进程列表"""
     df = SystemMonitor.get_process_list(limit=15)
     return df.to_dict(orient="records")
 
 @app.get("/api/system/disk")
 async def get_disk_status():
+    """获取磁盘使用情况"""
     return SystemMonitor.get_disk_usage()
 
 # --- SKILL MANAGEMENT APIs ---

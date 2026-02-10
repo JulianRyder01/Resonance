@@ -56,7 +56,7 @@ Thumbs.db
 # 允许提交模板文件，方便别人使用
 !config/profiles.yaml.template
 !config/config.yaml.template
-!docs/docimage1.png
+!docs
 # ========================
 # 7. 用户特定的忽略 (你原来列表里的)
 # ========================

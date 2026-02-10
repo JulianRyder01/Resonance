@@ -100,6 +100,7 @@ npm run dev
 - [ ] 修复打开Memory Core就会阻塞线程导致其他选项全部卡死的问题
 - [ ] 修复Memory Core几大显示的问题，比如cpu占用率不对且只有C盘
 - [ ] i18n
+- [ ] 即使云端skills添加失败，也会显示成功的bug
 
 ---
 

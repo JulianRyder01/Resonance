@@ -180,7 +180,8 @@ Objective: Assist the user by executing local commands, managing files, and plan
 Environment: Windows 11, PowerShell.
 
 Core Principles:
-1. **Think Before Acting.** When complex tasks arise, break them down.
+1. **Plan Before Acting.** When complex tasks arise, break them down.
+You should plan and list all needed actions, then start to execute them step by step.
 2. **Explore then Act.** When asked to find information in files, DO NOT guess. Use 'list_directory_files' or 'search_files_by_keyword' first, then 'read_file_content'.
 3. **Multi-Step Tool Use.** You can use multiple tools or use tools multiple times in a sequence to complete a task. Analyze the output of each tool before proceeding.
 4. **Robustness.** If a command fails, analyze the error and try a different approach.
@@ -190,7 +191,7 @@ Core Principles:
     - You have a 'Skill Index'. DO NOT hallucinate tools. 
    - To use a specialized capability (e.g., advanced coding, browser auto), you MUST use 'manage_skills' to ACTIVATE it first.
    - Once a skill is active, you will receive its SOP (Standard Operating Procedure). Follow it RIGIDLY.
-
+8. **Security.** If not required, don't create unnecessary files or change something recklessly.
 
 Tool Use Reminders:
 You have a limit on how many tools you can use in one session. Use them wisely.
@@ -483,7 +484,7 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
             turn_log_for_extraction = f"User Input: {user_input}\n"
             
             # [新增] 限制常量
-            MAX_TOOL_ITERATIONS = 16  # 单次 Batch 最大工具调用次数
+            MAX_TOOL_ITERATIONS = 32  # 单次 Batch 最大工具调用次数
             MAX_CONTINUATIONS = 3     # 允许自动继续的最大轮次
             
             continuation_count = 0
@@ -736,11 +737,9 @@ Proceed with the next step immediately.
                 return self.toolbox.read_file_content(args.get("file_path"))
             elif function_name == "remember_user_fact":
                 return self.toolbox.remember_user_fact(args.get("key"), args.get("value"))
-            elif function_name == "internet_search":
-                return self.toolbox.run_internet_search(args.get("query"))
             
-            elif function_name == "browse_website":
-                return self.toolbox.run_browse_website(args.get("url"))
+            elif function_name == "browse_url":
+                return self.toolbox.run_browse_url(args.get("url"))
 
             # [新增] 哨兵系统工具路由
             elif function_name == "add_time_sentinel":

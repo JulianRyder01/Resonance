@@ -66,25 +66,8 @@ class Toolbox:
             {
                 "type": "function",
                 "function": {
-                    "name": "internet_search",
-                    "description": "Perform a real-time internet search using DuckDuckGo. Use this when you need current events, news, documentation, or solutions to technical errors that are not in your memory.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The search keywords."
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "browse_website",
-                    "description": "Visit a specific URL and extract its text content. Use this AFTER 'internet_search' provides you with URLs.",
+                    "name": "browse_url",
+                    "description": "Visit a specific URL and extract its text content. Use this with URLs.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -679,19 +662,8 @@ class Toolbox:
             return f"Error saving fact: {e}"
     
     # [新增] 联网能力实现方法
-    def run_internet_search(self, query):
-        results = self.web_engine.search(query)
-        if not results:
-            return "No results found."
-        
-        # 格式化为可读字符串
-        output = f"Search Results for '{query}':\n\n"
-        for i, res in enumerate(results, 1):
-            output += f"{i}. {res['title']}\n   URL: {res['url']}\n   Snippet: {res['snippet']}\n\n"
-        output += "(Use 'browse_website' with a specific URL to read full content)"
-        return output
 
-    def run_browse_website(self, url):
+    def run_browse_url(self, url):
         data = self.web_engine.fetch_page(url)
         if "error" in data:
             return f"Error browsing page: {data['error']}"

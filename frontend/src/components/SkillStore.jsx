@@ -1,5 +1,6 @@
 // frontend/src/components/SkillStore.jsx
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next'; // [修改点] 引入 i18n
 import axios from 'axios';
 import { 
   Package, 
@@ -16,6 +17,7 @@ import { toast } from 'sonner';
 const API_BASE = "http://localhost:8000/api";
 
 export default function SkillStore() {
+  const { t } = useTranslation(); // [修改点] 获取翻译函数
   const [skills, setSkills] = useState({ legacy: {}, imported: {} });
   const [loading, setLoading] = useState(false);
   const [importPath, setImportPath] = useState("");
@@ -27,7 +29,7 @@ export default function SkillStore() {
       const res = await axios.get(`${API_BASE}/skills/list`);
       setSkills(res.data);
     } catch (err) {
-      toast.error("Failed to load skills");
+      toast.error(t("skill.failed_to_load_skills"));
     } finally {
       setLoading(false);
     }
@@ -40,30 +42,27 @@ export default function SkillStore() {
   const handleImport = async () => {
     if (!importPath.trim()) return;
     setImporting(true);
-    const toastId = toast.loading("Learning new skill... This may take a while (installing dependencies).");
-    
+    const toastId = toast.loading(t('skills.learning')); // [修改点] 翻译
     try {
       const res = await axios.post(`${API_BASE}/skills/learn`, { url_or_path: importPath });
-      toast.success("Skill Learned Successfully!", { id: toastId });
+      toast.success(t('common.success'), { id: toastId });
       setImportPath("");
       fetchSkills();
     } catch (err) {
       const msg = err.response?.data?.detail || err.message;
-      toast.error(`Failed: ${msg}`, { id: toastId, duration: 5000 });
+      toast.error(t('common.failed') +`${msg}`, { id: toastId, duration: 5000 });
     } finally {
       setImporting(false);
     }
   };
 
   const handleDelete = async (name) => {
-    if (!confirm(`Delete skill '${name}'? This will remove files.`)) return;
+    if (!confirm(t('skills.delete_confirm', { name }))) return; // [修改点] 翻译带参数
     try {
       await axios.delete(`${API_BASE}/skills/${name}`);
       toast.success(`Skill '${name}' deleted`);
       fetchSkills();
-    } catch (err) {
-      toast.error("Delete failed");
-    }
+    } catch (err) { toast.error(t('common.failed')+`${err}`); }
   };
 
   return (
@@ -72,9 +71,9 @@ export default function SkillStore() {
       <header className="flex justify-between items-end mb-8 shrink-0">
         <div>
           <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
-            <Package className="text-primary" /> Skill Store
+            <Package className="text-primary" /> {t('skills.title')} {/* [修改点] 翻译 */}
           </h1>
-          <p className="text-slate-500 mt-1">Manage agent capabilities and external plugins.</p>
+          <p className="text-slate-500 mt-1">{t('skills.subtitle')}</p>
         </div>
         <button onClick={fetchSkills} className="p-2 text-slate-400 hover:text-primary transition">
           <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
@@ -84,13 +83,13 @@ export default function SkillStore() {
       {/* Import Box */}
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-8 shrink-0">
         <h2 className="text-sm font-bold text-slate-700 uppercase tracking-wider mb-4 flex items-center gap-2">
-          <Download size={16} /> Import New Skill
+          <Download size={16} /> {t('skills.import_title')} {/* [修改点] 翻译 */}
         </h2>
         <div className="flex gap-4">
           <div className="flex-1 relative">
             <input 
               type="text" 
-              placeholder="Paste GitHub URL (https://github.com/...) or Local Absolute Path (D:\Skills\MySkill)"
+              placeholder={t('skills.placeholder')}
               className="w-full pl-4 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition text-sm font-mono"
               value={importPath}
               onChange={(e) => setImportPath(e.target.value)}
@@ -103,7 +102,7 @@ export default function SkillStore() {
             className="px-6 py-3 bg-primary text-white font-medium rounded-xl hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition shadow-md flex items-center gap-2"
           >
             {importing ? <RefreshCw className="animate-spin" size={18} /> : <Download size={18} />}
-            Learn
+            {t('skills.learn_btn')} {/* [修改点] 翻译 */}
           </button>
         </div>
         <p className="text-xs text-slate-400 mt-3 ml-1">

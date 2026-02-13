@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Trash2, Clock, FileText, Activity, RefreshCw } from 'lucide-react';
+import { useTranslation } from 'react-i18next'; // [修改点] 引入 i18n
 import axios from 'axios';
 import { toast } from 'sonner';
 
 const API_BASE = "http://localhost:8000/api";
 
 export default function SentinelDashboard() {
+  const { t } = useTranslation(); // [修改点] 获取翻译函数
   const [sentinels, setSentinels] = useState({ time: {}, file: {}, behavior: {} });
   const [loading, setLoading] = useState(false);
 
@@ -24,10 +26,10 @@ export default function SentinelDashboard() {
   const deleteSentinel = async (type, id) => {
     try {
       await axios.delete(`${API_BASE}/sentinels/${type}/${id}`);
-      toast.success("Sentinel removed");
+      toast.success(t('sentinel.removed')); // [修改点] 翻译
       fetchSentinels();
-    } catch (err) {
-      toast.error("Failed to remove sentinel");
+    } catch (err) { 
+      toast.error(t('sentinel.fail_remove')); 
     }
   };
 
@@ -41,8 +43,8 @@ export default function SentinelDashboard() {
     <div className="p-8 max-w-6xl mx-auto">
       <div className="flex justify-between items-center mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-slate-800">Sentinel System</h1>
-          <p className="text-slate-500">Autonomous monitoring agents status.</p>
+          <h1 className="text-3xl font-bold text-slate-800">{t('sentinel.title')}</h1> {/* [修改点] 翻译 */}
+          <p className="text-slate-500">{t('sentinel.subtitle')}</p>
         </div>
         <button onClick={fetchSentinels} className="p-2 text-slate-400 hover:text-primary transition">
           <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
@@ -50,7 +52,7 @@ export default function SentinelDashboard() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-        <Section title="Time Triggers" icon={Clock} color="text-blue-500" bg="bg-blue-50">
+        <Section title={t('sentinel.sections.time')} icon={Clock} color="text-blue-500" bg="bg-blue-50" emptyText={t('sentinel.empty')}>
           {Object.entries(sentinels.time || {}).map(([id, data]) => (
             <Card key={id} data={data} id={id} type="time" onDelete={deleteSentinel}>
               <div className="flex items-baseline gap-1 mb-2">
@@ -61,7 +63,7 @@ export default function SentinelDashboard() {
           ))}
         </Section>
 
-        <Section title="File Watchers" icon={FileText} color="text-emerald-500" bg="bg-emerald-50">
+        <Section title={t('sentinel.sections.file')} icon={FileText} color="text-emerald-500" bg="bg-emerald-50" emptyText={t('sentinel.empty')}>
           {Object.entries(sentinels.file || {}).map(([id, data]) => (
              <Card key={id} data={data} id={id} type="file" onDelete={deleteSentinel}>
                 <div className="font-mono text-[10px] text-slate-500 break-all bg-slate-100 p-2 rounded mb-3 border border-slate-200">
@@ -71,7 +73,7 @@ export default function SentinelDashboard() {
           ))}
         </Section>
 
-        <Section title="Behavior Hooks" icon={Activity} color="text-purple-500" bg="bg-purple-50">
+        <Section title={t('sentinel.sections.behavior')} icon={Activity} color="text-purple-500" bg="bg-purple-50" emptyText={t('sentinel.empty')}>
           {Object.entries(sentinels.behavior || {}).map(([id, data]) => (
              <Card key={id} data={data} id={id} type="behavior" onDelete={deleteSentinel}>
                 <div className="flex items-center gap-2 mb-3">
@@ -85,16 +87,14 @@ export default function SentinelDashboard() {
   );
 }
 
-const Section = ({ title, icon: Icon, children, color, bg }) => (
+const Section = ({ title, icon: Icon, children, color, bg, emptyText }) => (
   <div className="space-y-4">
     <div className={`flex items-center gap-2 ${color} font-bold uppercase text-xs tracking-wider mb-2`}>
       <div className={`p-1.5 rounded-md ${bg}`}><Icon size={14} /></div>
       {title}
     </div>
     {children.length === 0 ? (
-      <div className="h-32 border-2 border-dashed border-slate-100 rounded-xl flex items-center justify-center text-slate-300 text-sm italic">
-        No active sentinels
-      </div>
+      <div className="h-32 border-2 border-dashed border-slate-100 rounded-xl flex items-center justify-center text-slate-300 text-sm italic">{emptyText}</div>
     ) : children}
   </div>
 );

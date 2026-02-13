@@ -6,6 +6,7 @@ import { Cpu, Database, Battery, Zap, Activity, HardDrive, RefreshCw } from 'luc
 const API_BASE = "http://localhost:8000/api";
 
 export default function SystemMonitor() {
+  const { t } = useTranslation(); // [修改点] 获取翻译函数
   const [metrics, setMetrics] = useState(null);
   const [processes, setProcesses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -34,7 +35,7 @@ export default function SystemMonitor() {
     return (
       <div className="flex items-center justify-center h-full text-slate-400 gap-2">
         <RefreshCw className="animate-spin" size={20} />
-        Initializing Telemetry...
+        {t('monitor.telemetry_init')} {/* [修改点] 翻译 */}
       </div>
     );
   }
@@ -43,18 +44,18 @@ export default function SystemMonitor() {
     <div className="p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
       <header className="flex justify-between items-end">
         <div>
-          <h1 className="text-3xl font-bold text-slate-800">System Resources</h1>
-          <p className="text-slate-500 mt-1">Real-time performance telemetry.</p>
+          <h1 className="text-3xl font-bold text-slate-800">{t('monitor.title')}</h1> {/* [修改点] 翻译 */}
+          <p className="text-slate-500 mt-1">{t('monitor.subtitle')}</p>
         </div>
         <div className="text-xs font-mono text-slate-400 bg-slate-100 px-3 py-1 rounded-full">
-          LAST UPDATE: {metrics?.timestamp}
+          {t('monitor.last_update').toUpperCase()}: {metrics?.timestamp} {/* [修改点] 翻译 */}
         </div>
       </header>
 
       {/* 核心指标卡片 */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <MetricCard 
-          label="CPU Usage" 
+          label={t('monitor.cpu')} // [修改点] 翻译
           value={`${metrics?.cpu_percent}%`} 
           icon={Cpu} 
           color="text-blue-500"
@@ -62,7 +63,7 @@ export default function SystemMonitor() {
           progress={metrics?.cpu_percent}
         />
         <MetricCard 
-          label="Memory (RAM)" 
+          label={t('monitor.mem')} // [修改点] 翻译
           value={`${metrics?.memory_percent}%`} 
           subValue={`${metrics?.memory_used_gb} / ${metrics?.memory_total_gb} GB`}
           icon={Database} 
@@ -71,9 +72,9 @@ export default function SystemMonitor() {
           progress={metrics?.memory_percent}
         />
         <MetricCard 
-          label="Battery Status" 
+          label={t('monitor.battery')} // [修改点] 翻译
           value={`${metrics?.battery_percent}%`} 
-          subValue={metrics?.power_plugged ? "AC Power Connected" : "On Battery Supply"}
+          subValue={metrics?.power_plugged ? t('monitor.ac_connected') : t('monitor.on_battery')} // [修改点] 翻译
           icon={metrics?.power_plugged ? Zap : Battery} 
           color={metrics?.battery_percent < 20 ? "text-red-500" : "text-emerald-500"}
           bg={metrics?.battery_percent < 20 ? "bg-red-500" : "bg-emerald-500"}
@@ -88,7 +89,7 @@ export default function SystemMonitor() {
           <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
             <div className="flex items-center gap-2 font-bold text-slate-700">
               <Activity size={18} className="text-blue-500" />
-              Top Resource Consumers
+              {t('monitor.process_title')} {/* [修改点] 翻译 */}
             </div>
             <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Live Feed</span>
           </div>
@@ -129,16 +130,11 @@ export default function SystemMonitor() {
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
              <div className="flex items-center gap-2 font-bold text-slate-700 mb-6">
                 <HardDrive size={18} className="text-amber-500" />
-                Drive Storage
+                {t('monitor.disk_title')} {/* [修改点] 翻译 */}
              </div>
-             <DiskUsage path="C:\" />
-             <div className="mt-8 space-y-4">
                <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl">
-                 <h4 className="text-blue-600 text-xs font-bold uppercase mb-1">Agent Tip</h4>
-                 <p className="text-slate-600 text-xs leading-relaxed">
-                   Currently monitoring {processes.length} active processes. System load is within normal operating parameters.
-                 </p>
-               </div>
+               <h4 className="text-blue-600 text-xs font-bold uppercase mb-1">{t('monitor.tip_title')}</h4> {/* [修改点] 翻译 */}
+               <p className="text-slate-600 text-xs leading-relaxed">{t('monitor.tip_text')}</p> {/* [修改点] 翻译 */}
              </div>
           </div>
         </div>

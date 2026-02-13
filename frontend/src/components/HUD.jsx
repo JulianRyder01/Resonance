@@ -2,10 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
-import { 
-  Send, Bot, StopCircle, 
-  Terminal, Sparkles
-} from 'lucide-react';
+import { Send, Bot, StopCircle, Terminal, Sparkles, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 const API_BASE = "http://localhost:8000/api";
@@ -20,6 +17,13 @@ export default function HUD({ ws, isConnected }) {
   // HUD 默认使用主会话
   const sessionId = "resonance_main";
   const messagesEndRef = useRef(null);
+
+  const extractPlan = (text) => {
+    const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
+    if (planMatch) {
+      setCurrentPlan(planMatch[1]);
+    }
+  };
 
   // 1. 初始化加载任务和最新消息
   useEffect(() => {
@@ -44,12 +48,7 @@ export default function HUD({ ws, isConnected }) {
     fetchContext();
   }, []);
 
-  const extractPlan = (text) => {
-    const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
-    if (planMatch) {
-      setCurrentPlan(planMatch[1]);
-    }
-  };
+  
 
   // 2. 解析任务列表
   const tasks = useMemo(() => {
@@ -92,6 +91,9 @@ export default function HUD({ ws, isConnected }) {
             return [...prev, { role: 'assistant', content: deltaContent, complete: false }];
           });
           setIsTyping(true);
+        } else if (data.type === 'status') {
+          // [重要] 这里接收 Supervisor 的干预状态
+          setMessages(prev => [...prev, { role: 'system', content: data.content }]);
         } else if (data.type === 'done') {
           setMessages(prev => prev.map(m => ({ ...m, complete: true })));
           setIsTyping(false);
@@ -103,12 +105,12 @@ export default function HUD({ ws, isConnected }) {
             content: t('hud.tool_executed') 
           }]);
         }
-      } catch (err) {}
+      } catch (err) {t('common.error')+`${err}`}
     };
 
     ws.addEventListener('message', handleMessage);
     return () => ws.removeEventListener('message', handleMessage);
-  }, [ws]);
+  }, [ws, t]);
 
   // 自动滚动到最新
   useEffect(() => {
@@ -154,7 +156,7 @@ export default function HUD({ ws, isConnected }) {
             <Sparkles size={16} className="text-blue-400" />
             <span className="font-bold text-sm tracking-wide">{t('hud.title')}</span>
           </div>
-          <span className="text-[10px] font-mono text-slate-500">
+          <span className={`text-[10px] font-mono ${isConnected ? 'text-emerald-500' : 'text-red-500'}`}>
             {isConnected ? t('common.online') : t('common.offline')}
           </span>
         </div>

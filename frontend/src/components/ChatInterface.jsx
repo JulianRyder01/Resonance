@@ -87,12 +87,11 @@ export default function ChatInterface({ ws, isConnected }) {
       // 确保 resonance_main 始终存在
       const list = res.data;
       if (!list.find(s => s.id === "resonance_main")) {
-        // 如果没有主进程会话，手动加一个伪造的，等到真正产生对话会自动创建
-        list.unshift({ id: "resonance_main", preview: "System Main Process", updated_at: Date.now() });
+        list.unshift({ id: "resonance_main", preview: t('chat.main_process'), updated_at: Date.now() }); // [修改点] 翻译
       }
       setSessions(list);
     } catch (err) {
-      toast.error("Failed to load sessions");
+      toast.error(t('chat.load_failed')); // [修改点] 翻译错误提示
     } finally {
       setLoadingSessions(false);
     }
@@ -106,7 +105,7 @@ export default function ChatInterface({ ws, isConnected }) {
       setMessages([]);
       fetchSessions();
     } catch (err) {
-      toast.error("Failed to create session");
+      toast.error(t('common.failed'));
     }
   };
 
@@ -123,7 +122,7 @@ export default function ChatInterface({ ws, isConnected }) {
       if (activeSessionId === id) setActiveSessionId("resonance_main");
       fetchSessions();
     } catch (err) {
-      toast.error("Failed to delete");
+      toast.error(t('common.failed'));
     }
   };
 
@@ -247,10 +246,10 @@ export default function ChatInterface({ ws, isConnected }) {
             // 处理后端发来的状态信息，例如 Stop 确认
             if (data.content.includes("Aborted") || data.content.includes("Stop")) {
                  setIsTyping(false);
-                 setMessages(prev => [...prev, { role: 'system', content: data.content }]);
+                 setMessages(prev => [...prev, { role: 'system', content: t('chat.aborted') }]);
              } else if (data.content.includes("Supervisor")) {
                  // [新增] 显示督战信息
-                setMessages(prev => [...prev, { role: 'system', content: data.content }]);
+                setMessages(prev => [...prev, { role: 'system', content: t('chat.supervisor') + ": " + data.content.split(":")[1]}]);
             }
         } 
         else if (data.type === 'error') {
@@ -321,7 +320,7 @@ export default function ChatInterface({ ws, isConnected }) {
       ws.send(JSON.stringify({ message: "/stop", session_id: activeSessionId }));
       
       // 立即在前端给予反馈，不要等待后端
-      toast.info("Interrupting AI...");
+      toast.info(t('chat.interrupting'));
       // 我们不在这里设置 isTyping(false)，因为我们要等待后端确认 'status' 消息
       // 这样可以确保后端确实收到了指令并停止了处理
     }
@@ -416,7 +415,7 @@ export default function ChatInterface({ ws, isConnected }) {
                         {isMain ? t('chat.main_process') : s.id}
                       </div>
                       <div className="text-[10px] text-slate-400 truncate">
-                        {s.preview || "Empty conversation"}
+                        {s.preview ||  t('chat.empty_preview')}
                       </div>
                     </>
                   )}
@@ -446,7 +445,7 @@ export default function ChatInterface({ ws, isConnected }) {
         <div className="h-16 border-b border-border bg-surface/80 backdrop-blur-md flex items-center justify-between px-8 shrink-0 z-10">
           <div className="flex items-center gap-3">
             <span className="font-bold text-slate-700 text-lg">
-              {activeSessionId === "resonance_main" ? "Resonance Main Process" : activeSessionId}
+              {activeSessionId === "resonance_main" ? t('chat.main_process') : activeSessionId}
             </span>
             <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider 
               ${isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
@@ -542,7 +541,6 @@ export default function ChatInterface({ ws, isConnected }) {
                 e.target.style.height = e.target.scrollHeight + 'px';
               }}
               onKeyDown={handleKeyDown}
-              placeholder={t('chat.placeholder', { session: activeSessionId })}
             />
             <button 
               onClick={sendMessage}

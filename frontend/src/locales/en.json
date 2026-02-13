@@ -19,7 +19,15 @@
     "welcome": "System Ready",
     "aborted": "🛑 Aborted by User",
     "supervisor": "👮 Supervisor Intervention",
-    "main_process": "Resonance Main"
+    "main_process": "Resonance Main",
+    "delete_conversation": "Are you sure you want to delete this conversation?",
+    "cannot_delete_main": "Cannot delete main process session.",
+    "clear_all_messages": "Clear all messages in this chat?",
+    "system_ready": "System Ready",
+    "send": "Send",
+    "footer": "RESONANCE WINDOWS AGENT - ECHOING INTELLIGENCE LOCALLY",
+    "empty_preview": "Empty conversation",
+    "interrupting": "Interrupting AI..."
   },
   "skills": {
     "title": "Skill Store",
@@ -30,7 +38,22 @@
     "help_text": "Supported: Resonance Scripts, Anthropic MCP Skills, or Python Projects.",
     "imported_tag": "Imported Skills",
     "legacy_tag": "Legacy Scripts",
-    "empty": "No imported skills yet. Try adding one above."
+    "empty": "No imported skills yet. Try adding one above.",
+    "learning": "Learning new skill... This may take a while.",
+    "delete_confirm": "Delete skill '{{name}}'? This will remove files.",
+    "failed_to_load_skills": "Failed to load skills"
+  },
+  "sentinel": {
+    "title": "Sentinel System",
+    "subtitle": "Autonomous monitoring agents status.",
+    "sections": {
+      "time": "Time Triggers",
+      "file": "File Watchers",
+      "behavior": "Behavior Hooks"
+    },
+    "empty": "No active sentinels",
+    "removed": "Sentinel removed",
+    "fail_remove": "Failed to remove sentinel"
   },
   "monitor": {
     "title": "System Resources",
@@ -40,17 +63,20 @@
     "battery": "Battery Status",
     "process_title": "Top Resource Consumers",
     "disk_title": "Drive Storage",
-    "tip_title": "Agent Tip"
+    "tip_title": "Agent Tip",
+    "ac_connected": "AC Power Connected",
+    "on_battery": "On Battery Supply",
+    "telemetry_init": "Initializing Telemetry...",
+    "live_feed": "Live Feed",
+    "tip_text": "Currently monitoring active processes. System load is within normal operating parameters."
   },
   "memory": {
     "title": "Memory Core",
     "subtitle": "Manage long-term vector knowledge base (RAG).",
-    "strategy":{
+    "strategy": {
         "semantic": "Semantic",
         "hybrid": "Hybrid (Time-Weighted)"
-    } ,
-    "id": "id",
-    "created": "Created At",
+    },
     "total_vectors": "Total Vectors",
     "active_7d": "Active (7 Days)",
     "search_placeholder": "Search memory contents, tags...",
@@ -59,18 +85,18 @@
         "relevance": "Sort: Most Recalled",
         "accessed": "Sort: Recently Accessed"
     },
-    "col": {
-        "type": "Type",
-        "content": "Content",
-        "strength": "Recall Strength",
-        "last": "Last Access"
-    },
     "table": {
         "type": "Type",
         "content": "Content",
-        "strength": "Recall Frequency",
-        "last_access": "Last Time Accessed By Agent"
-    }
+        "strength": "Recall Strength",
+      "last_access": "Last Time Accessed"
+    },
+    "hits": "Hits",
+    "id": "ID",
+    "created": "Created",
+    "no_data": "No relevant memories found.",
+    "delete_tooltip": "Permanently remove this memory",
+    "delete_confirm": "Are you sure you want to delete this memory permanently?"
   },
   "settings": {
     "title": "Model Configuration",
@@ -89,23 +115,30 @@
     "model_label": "Model Name",
     "temp_label": "Temperature",
     "key_label": "API Key",
-    "save_btn": "Save Profile"
+    "save_btn": "Save Profile",
+    "delete_confirm": "Delete profile '{{id}}'?",
+    "loading": "Loading configuration...",
+    "profile_saved_successfully": "Profile saved successfully",
+    "failed_save_profile": "Failed to save profile:"
   },
   "common": {
-    "delete_confirm": "Are you sure?",
-    "delete_memory_confirm": "Permanently delete this memory?",
-    "clear_chat_confirm": "Clear all messages in this chat?",
     "success": "Success",
     "failed": "Failed",
     "lang_switched": "Language switched",
-    "online": "System Online",
-    "refresh": "Refresh"
+    "online": "ONLINE",
+    "offline": "OFFLINE",
+    "refresh": "Refresh",
+    "loading": "Loading...",
+    "cancel": "Cancel"
   },
   "hud": {
     "title": "Resonance",
     "current_task": "Current Task",
-    "all_tasks_completed":"All tasks completed.",
-    "placeholder": "Continue to ask",
-    "thinking": "Thinking..."
+    "all_tasks_completed": "All tasks completed.",
+    "no_active_plan": "No active plan.",
+    "waiting_for_commands": "Waiting for commands...",
+    "thinking": "Thinking...",
+    "placeholder": "Enter command (Ctrl+Enter)",
+    "tool_executed": "Tool Executed"
   }
 }

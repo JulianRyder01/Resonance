@@ -1,5 +1,6 @@
 // frontend/src/components/ModelConfig.jsx
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next'; // [修改点] 引入 i18n
 import axios from 'axios';
 import { Settings, CheckCircle, Cpu, Key, Server, Plus, Edit2, Trash2, X, Save } from 'lucide-react';
 import { toast } from 'sonner';
@@ -7,6 +8,7 @@ import { toast } from 'sonner';
 const API_BASE = "http://localhost:8000/api";
 
 export default function ModelConfig() {
+  const { t } = useTranslation(); // [修改点] 获取翻译函数
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -28,9 +30,7 @@ export default function ModelConfig() {
       const res = await axios.get(`${API_BASE}/config`);
       setConfig(res.data);
       setLoading(false);
-    } catch (err) {
-      toast.error("Failed to load config");
-    }
+    } catch (err) { toast.error(t('common.failed')); }
   };
 
   useEffect(() => {
@@ -42,11 +42,9 @@ export default function ModelConfig() {
   const handleActivate = async (profileId) => {
     try {
       await axios.post(`${API_BASE}/config/active`, { profile_id: profileId });
-      toast.success(`Switched to ${profileId}`);
+      toast.success(t('common.success'));
       fetchConfig();
-    } catch (err) {
-      toast.error("Failed to switch profile");
-    }
+    } catch (err) { toast.error(t('common.failed')); }
   };
 
   const openEditModal = (id, profile) => {
@@ -78,14 +76,12 @@ export default function ModelConfig() {
   };
 
   const handleDelete = async (id) => {
-    if (!confirm(`Delete profile '${id}'?`)) return;
+    if (!confirm(t('settings.delete_confirm', { id }))) return; // [修改点] 翻译带参数
     try {
       await axios.delete(`${API_BASE}/config/profiles/${id}`);
-      toast.success("Profile deleted");
+      toast.success(t('common.success'));
       fetchConfig();
-    } catch (err) {
-      toast.error(err.response?.data?.detail || "Delete failed");
-    }
+    } catch (err) { toast.error(t('common.failed')); }
   };
 
   const handleSave = async () => {
@@ -96,15 +92,15 @@ export default function ModelConfig() {
 
     try {
       await axios.post(`${API_BASE}/config/profiles/save`, formData);
-      toast.success("Profile saved successfully");
+      toast.success(t('profile_saved_successfully'));
       setIsModalOpen(false);
       fetchConfig();
     } catch (err) {
-      toast.error("Failed to save profile");
+      toast.error(t("failed_save_profile"), err);
     }
   };
 
-  if (loading) return <div className="p-8 flex items-center justify-center h-full text-slate-400">Loading configuration...</div>;
+  if (loading) return <div className="p-8 flex items-center justify-center h-full text-slate-400">{t('settings.loading')}</div>;
 
   return (
     // [修复点] 添加 h-full overflow-y-auto 以支持滚动
@@ -112,15 +108,15 @@ export default function ModelConfig() {
       <header className="mb-10 flex justify-between items-end">
         <div>
         <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
-          <Settings className="text-primary" /> Model Configuration
+            <Settings className="text-primary" /> {t('settings.title')} {/* [修改点] 翻译 */}
         </h1>
-        <p className="text-slate-500 mt-2">Manage LLM profiles and select the active brain.</p>
+            <p className="text-slate-500 mt-2">{t('settings.subtitle')}</p>
         </div>
         <button 
           onClick={openAddModal}
           className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-xl hover:bg-primary-hover shadow-lg shadow-primary/20 transition-all font-medium text-sm"
         >
-          <Plus size={18} /> Add Profile
+          <Plus size={18} />  {t('settings.add_profile')} 
         </button>
       </header>
 
@@ -212,7 +208,7 @@ export default function ModelConfig() {
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200 animate-in zoom-in-95 duration-200">
                 <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                     <h3 className="font-bold text-slate-800 text-lg">
-                        {editingProfileId ? 'Edit Profile' : 'New Profile'}
+                        {editingProfileId ? t('settings.modal_edit') : t('settings.modal_new')}
                     </h3>
                     <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
                         <X size={20} />

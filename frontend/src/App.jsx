@@ -40,8 +40,8 @@ function App() {
   
   // [修改点] 语言切换处理
   const toggleLanguage = async () => {
-    const newLang = i18n.language === 'zh' ? 'en' : 'zh';
-    i18n.changeLanguage(newLang);
+    const newLang = i18n.language.startsWith('zh') ? 'en' : 'zh';
+    await i18n.changeLanguage(newLang);
     
     // 同步到后端
     try {
@@ -127,7 +127,7 @@ function App() {
         // 忽略解析错误，交给组件处理
       }
     };
-  }, []);
+  }, [t, isHudMode]); // [修改点] 增加依赖
 
   const startHeartbeat = () => {
     stopHeartbeat();
@@ -206,15 +206,15 @@ function App() {
           </nav>
         </div>
 
-        {/* [修改点] 底部增加语言切换器 */}
-        <div className="p-4 space-y-2">
+        <div className="p-4 space-y-2 mt-auto">
+          {/* [修改点] 语言切换器 UI */}
           <button 
             onClick={toggleLanguage}
             className="w-full flex items-center justify-between px-4 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 rounded-lg transition-colors border border-transparent hover:border-slate-200"
           >
             <div className="flex items-center gap-2">
               <Languages size={14} />
-              {i18n.language === 'zh' ? '中文' : 'English'}
+              {i18n.language.startsWith('zh') ? '中文' : 'English'}
             </div>
             <span className="text-[10px] opacity-50">Switch</span>
           </button>
@@ -222,7 +222,7 @@ function App() {
           <div className={`p-3 rounded-lg border transition-all duration-300 ${isConnected ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'}`}>
             <div className="flex items-center justify-between mb-1">
               <span className={`text-[10px] font-bold uppercase tracking-wide ${isConnected ? 'text-emerald-700' : 'text-red-700'}`}>
-                {isConnected ? t('chat.online') : t('chat.offline')}
+                {isConnected ? t('chat.online') : t('chat.offline')} {/* [修改点] 在线状态翻译 */}
               </span>
               {isConnected ? <Wifi size={14} className="text-emerald-500" /> : <WifiOff size={14} className="text-red-500" />}
             </div>

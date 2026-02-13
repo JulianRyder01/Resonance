@@ -69,14 +69,12 @@ export default function MemoryManager() {
   };
 
   const deleteMemory = async (id) => {
-    if (!confirm("Are you sure you want to delete this memory permanently?")) return;
+    if (!confirm(t('memory.delete_confirm'))) return; // [修改点] 翻译
     try {
       await axios.delete(`${API_BASE}/memory/${id}`);
-      toast.success("Memory deleted");
+      toast.success(t('common.success'));
       setMemories(prev => prev.filter(m => m.id !== id));
-    } catch (err) {
-      toast.error("Failed to delete");
-    }
+    } catch (err) { toast.error(t('common.failed')); }
   };
 
   useEffect(() => {
@@ -177,7 +175,7 @@ export default function MemoryManager() {
             </div>
             <div className="p-3 bg-blue-50 text-blue-500 rounded-lg"><Layers size={24} /></div>
             <div>
-              <div className="text-sm text-slate-500 font-medium uppercase tracking-wider">Total Vectors</div>
+              <div className="text-sm text-slate-500 font-medium uppercase tracking-wider">{t('memory.total_vectors')}</div> {/* [修改点] 翻译 */}
               <div className="text-3xl font-bold text-slate-800">{stats.total}</div>
             </div>
           </div>
@@ -188,7 +186,7 @@ export default function MemoryManager() {
             </div>
             <div className="p-3 bg-emerald-50 text-emerald-500 rounded-lg"><Activity size={24} /></div>
             <div>
-              <div className="text-sm text-slate-500 font-medium uppercase tracking-wider">Active (7 Days)</div>
+              <div className="text-sm text-slate-500 font-medium uppercase tracking-wider">{t('memory.active_7d')}</div> {/* [修改点] 翻译 */}
               <div className="text-3xl font-bold text-slate-800">{stats.activeRecent}</div>
             </div>
           </div>

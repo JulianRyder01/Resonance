@@ -626,7 +626,7 @@ Response (JSON Only):
                     if decision.get("status") == "INCOMPLETE":
                         supervisor_loops += 1
                         instruction = decision.get("instruction", "Task incomplete.")
-                        msg = f"[👮 SUPERVISOR INTERVENTION]: Task not finished. {instruction} Continue executing the plan immediately."
+                        msg = f"[SUPERVISOR INTERVENTION]: Task not finished. {instruction} Continue executing the plan immediately."
                         
                         yield {"type": "status", "content": f"👮 Supervisor: {instruction} (Auto-Continuing)"}
                         

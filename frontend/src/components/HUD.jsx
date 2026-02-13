@@ -6,10 +6,12 @@ import {
   Send, Bot, StopCircle, 
   Terminal, Sparkles
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 const API_BASE = "http://localhost:8000/api";
 
 export default function HUD({ ws, isConnected }) {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [currentPlan, setCurrentPlan] = useState("");
@@ -71,9 +73,9 @@ export default function HUD({ ws, isConnected }) {
   useEffect(() => {
     if (!ws) return;
 
-    const handleMsg = (e) => {
+    const handleMessage = (event) => {
       try {
-        const data = JSON.parse(e.data);
+        const data = JSON.parse(event.data);
         if (data.session_id && data.session_id !== sessionId) return;
 
         if (data.type === 'delta') {
@@ -98,14 +100,14 @@ export default function HUD({ ws, isConnected }) {
           setMessages(prev => [...prev, { 
             role: 'tool', 
             name: data.name, 
-            content: "Executed." 
+            content: t('hud.tool_executed') 
           }]);
         }
       } catch (err) {}
     };
 
-    ws.addEventListener('message', handleMsg);
-    return () => ws.removeEventListener('message', handleMsg);
+    ws.addEventListener('message', handleMessage);
+    return () => ws.removeEventListener('message', handleMessage);
   }, [ws]);
 
   // 自动滚动到最新
@@ -150,17 +152,17 @@ export default function HUD({ ws, isConnected }) {
         <div className="flex justify-between items-center mb-2">
           <div className="flex items-center gap-2">
             <Sparkles size={16} className="text-blue-400" />
-            <span className="font-bold text-sm tracking-wide">Resonance HUD</span>
+            <span className="font-bold text-sm tracking-wide">{t('hud.title')}</span>
           </div>
           <span className="text-[10px] font-mono text-slate-500">
-            {isConnected ? 'ONLINE' : 'OFFLINE'}
+            {isConnected ? t('common.online') : t('common.offline')}
           </span>
         </div>
         
         {tasks.length > 0 ? (
           <div className="space-y-1">
             <div className="flex justify-between text-[10px] text-slate-400 uppercase">
-              <span>Current Task</span>
+              <span>{t('hud.current_task')}</span>
               <span>{progress}%</span>
             </div>
             <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
@@ -171,11 +173,11 @@ export default function HUD({ ws, isConnected }) {
             </div>
             {/* 只显示第一个未完成的任务 */}
             <div className="text-xs text-slate-300 truncate mt-1">
-              {tasks.find(t => !t.completed)?.text || "All tasks completed"}
+              {tasks.find(t => !t.completed)?.text || t('hud.all_tasks_completed')}
             </div>
           </div>
         ) : (
-          <div className="text-xs text-slate-500 italic">No active plan detected.</div>
+          <div className="text-xs text-slate-500 italic">{t('hud.no_active_plan')}</div>
         )}
       </div>
 
@@ -183,7 +185,7 @@ export default function HUD({ ws, isConnected }) {
       <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-hide">
         {messages.length === 0 && (
             <div className="h-full flex items-center justify-center text-slate-700 text-sm">
-                Waiting for commands...
+                {t('hud.waiting_for_commands')}
             </div>
         )}
         
@@ -214,7 +216,7 @@ export default function HUD({ ws, isConnected }) {
         ))}
         {isTyping && (
             <div className="flex items-center gap-2 text-xs text-blue-400 animate-pulse px-2">
-                <Bot size={12} /> Thinking...
+                <Bot size={12} /> {t('hud.thinking')}
             </div>
         )}
         <div ref={messagesEndRef} />
@@ -227,7 +229,7 @@ export default function HUD({ ws, isConnected }) {
             autoFocus
             rows={2}
             className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-3 pr-10 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 resize-none placeholder-slate-600"
-            placeholder="Chat with Resonance... (Ctrl+Enter)"
+            placeholder={t('hud.placeholder')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}

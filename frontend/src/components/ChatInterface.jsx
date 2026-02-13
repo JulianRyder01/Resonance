@@ -31,7 +31,7 @@ const ToolMessage = ({ name, content }) => {
                 {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <Play size={10} /> 
                 TOOL: {displayName}
-                {!expanded && <span className="text-slate-500 normal-case tracking-normal ml-auto truncate max-w-[500px]">{preview}</span>}
+                {!expanded && <span className="text-slate-500 normal-case tracking-normal ml-auto truncate max-w-[300px]">{preview}</span>}
             </button>
             {expanded && (
                 <div className="p-3 border-t border-slate-800 bg-slate-900 overflow-x-auto">
@@ -113,10 +113,10 @@ export default function ChatInterface({ ws, isConnected }) {
   const deleteSession = async (e, id) => {
     e.stopPropagation();
     if (id === "resonance_main") {
-      toast.error("Cannot delete Main Process");
+      toast.error(t('chat.cannot_delete_main'));
       return;
     }
-    if (!confirm("Delete this conversation?")) return;
+    if (!confirm(t('chat.delete_conversation'))) return;
     
     try {
       await axios.delete(`${API_BASE}/sessions/${id}`);
@@ -328,13 +328,13 @@ export default function ChatInterface({ ws, isConnected }) {
   };
 
   const clearCurrentSession = async () => {
-    if (!confirm("Clear all messages in this chat?")) return;
+    if (!confirm(t('chat.clear_all_messages'))) return;
     try {
       await axios.delete(`${API_BASE}/sessions/${activeSessionId}/messages`);
       setMessages([]);
       setCurrentPlan("");
     } catch(e) {
-      toast.error("Failed to clear");
+      toast.error(t('common.failed'));
     }
   };
 
@@ -413,7 +413,7 @@ export default function ChatInterface({ ws, isConnected }) {
                   ) : (
                     <>
                       <div className={`text-sm font-medium truncate ${isActive ? 'text-slate-800' : ''}`}>
-                        {isMain ? "Resonance Main" : s.id}
+                        {isMain ? t('chat.main_process') : s.id}
                       </div>
                       <div className="text-[10px] text-slate-400 truncate">
                         {s.preview || "Empty conversation"}
@@ -485,7 +485,7 @@ export default function ChatInterface({ ws, isConnected }) {
                 <Command size={40} className="text-primary/40" />
               </div>
               <div className="text-center">
-                <p className="text-lg font-bold text-text-primary/60 italic tracking-tight">System Ready</p>
+                <p className="text-lg font-bold text-text-primary/60 italic tracking-tight">{t('chat.system_ready')}</p>
                 <p className="text-sm">Session: {activeSessionId}</p>
               </div>
             </div>
@@ -542,17 +542,19 @@ export default function ChatInterface({ ws, isConnected }) {
                 e.target.style.height = e.target.scrollHeight + 'px';
               }}
               onKeyDown={handleKeyDown}
+              placeholder={t('chat.placeholder', { session: activeSessionId })}
             />
             <button 
               onClick={sendMessage}
               disabled={!input.trim() || !isConnected}
               className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-primary text-white rounded-xl hover:bg-primary-hover disabled:opacity-30 disabled:grayscale transition-all shadow-lg active:scale-95"
+              aria-label={t('chat.send')}
             >
               <Send size={20} />
             </button>
           </div>
           <p className="text-center text-[10px] text-text-secondary mt-4 uppercase tracking-tighter opacity-50">
-            Resonance • Multi-Session AI Host Agent • System Integrated
+            {t('chat.footer')}
           </p>
         </div>
       </div>

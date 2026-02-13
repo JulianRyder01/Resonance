@@ -14,10 +14,12 @@ import {
   Layers
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useTranslation } from 'react-i18next';
 
 const API_BASE = "http://localhost:8000/api";
 
 export default function MemoryManager() {
+  const { t } = useTranslation();
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -133,9 +135,9 @@ export default function MemoryManager() {
       <header className="flex justify-between items-end mb-6 shrink-0">
         <div>
           <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
-            <Database className="text-primary" /> Memory Core
+            <Database className="text-primary" /> {t('memory.title')}
           </h1>
-          <p className="text-slate-500 mt-1">Manage long-term vector knowledge base (RAG).</p>
+          <p className="text-slate-500 mt-1">{t('memory.subtitle')}</p>
         </div>
         
         <div className="flex gap-3">
@@ -146,14 +148,14 @@ export default function MemoryManager() {
                     disabled={strategyLoading}
                     className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${currentStrategy === 'semantic' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                 >
-                    Semantic
+                    {t('memory.strategy.semantic')}
                 </button>
                 <button 
                     onClick={() => updateStrategy('hybrid_time')}
                     disabled={strategyLoading}
                     className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${currentStrategy === 'hybrid_time' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                 >
-                    Hybrid (Time-Weighted)
+                    {t('memory.strategy.hybrid')}
                 </button>
             </div>
 
@@ -161,7 +163,7 @@ export default function MemoryManager() {
             onClick={fetchMemories} 
             className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 hover:text-primary transition shadow-sm font-medium text-sm"
             >
-            <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> Refresh
+            <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> {t('common.refresh')}
             </button>
         </div>
       </header>
@@ -199,7 +201,7 @@ export default function MemoryManager() {
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
             <input 
             className="w-full pl-11 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition shadow-sm text-sm"
-            placeholder="Search memory contents, tags..."
+            placeholder={t('memory.search_placeholder')}
             value={search}
             onChange={e => setSearch(e.target.value)}
             />
@@ -212,9 +214,9 @@ export default function MemoryManager() {
                 onChange={(e) => setSortMode(e.target.value)}
                 className="appearance-none bg-white border border-slate-200 text-slate-600 py-2.5 pl-4 pr-10 rounded-xl text-sm font-medium shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 hover:bg-slate-50 cursor-pointer"
             >
-                <option value="time">Sort: Newest First</option>
-                <option value="relevance">Sort: Most Recalled</option>
-                <option value="accessed">Sort: Recently Accessed</option>
+                <option value="time">{t('memory.sort.time')}</option>
+                <option value="relevance">{t('memory.sort.relevance')}</option>
+                <option value="accessed">{t('memory.sort.accessed')}</option>
             </select>
             <ArrowUpDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
         </div>
@@ -225,20 +227,20 @@ export default function MemoryManager() {
         <table className="w-full text-left border-collapse">
           <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
             <tr>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-32">Type</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Memory Content</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-48">Recall Strength</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-40 text-right">Last Access</th>
+              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-32">{t('memory.table.type')}</th>
+              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">{t('memory.table.content')}</th>
+              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-48">{t('memory.table.strength')}</th>
+              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-40 text-right">{t('memory.table.last_access')}</th>
               <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-20"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
                <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400 flex flex-col items-center gap-2">
-                   <RefreshCw className="animate-spin" /> Loading database...
+                   <RefreshCw className="animate-spin" /> {t('common.loading')}
                </td></tr>
             ) : processedData.length === 0 ? (
-              <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">Database is empty or no matches found.</td></tr>
+              <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">{t('memory.no_data')}</td></tr>
             ) : (
                 processedData.map((item) => {
                     const hitPercent = Math.min((item.access_count / (stats?.maxHits || 1)) * 100, 100);
@@ -258,7 +260,7 @@ export default function MemoryManager() {
                                 {item.content}
                             </div>
                             <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
-                                ID: {item.id.substring(0,8)}... • Created: {new Date(item.timestamp).toLocaleDateString()}
+                                {t('memory.id')}: {item.id.substring(0,8)}... • {t('memory.created')}: {new Date(item.timestamp).toLocaleDateString()}
                             </div>
                         </td>
 
@@ -296,7 +298,7 @@ export default function MemoryManager() {
                             <button 
                             onClick={() => deleteMemory(item.id)}
                             className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition opacity-0 group-hover:opacity-100"
-                            title="Delete Memory"
+                            title={t('memory.delete_tooltip')}
                             >
                             <Trash2 size={16} />
                             </button>

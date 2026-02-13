@@ -1,11 +1,12 @@
 // frontend/src/App.jsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useTranslation } from 'react-i18next'; // [修改点]
+import { useTranslation } from 'react-i18next';
 import { Toaster, toast } from 'sonner';
 import { 
   Terminal, Shield, Activity, Database, Settings, 
-  Zap, Wifi, WifiOff, Package, Languages // [修改点] 增加语言图标
+  Zap, Wifi, WifiOff, Package, Languages
 } from 'lucide-react';
+import axios from 'axios';
 
 import ChatInterface from './components/ChatInterface';
 import SentinelDashboard from './components/SentinelDashboard';
@@ -13,7 +14,7 @@ import SystemMonitor from './components/SystemMonitor';
 import MemoryManager from './components/MemoryManager';
 import ModelConfig from './components/ModelConfig';
 import SkillStore from './components/SkillStore';
-import HUD from './components/HUD'; // [新增] 引入 HUD 组件
+import HUD from './components/HUD';
 
 const WS_URL = "ws://localhost:8000/ws/chat";
 const HEARTBEAT_INTERVAL = 30000; // 30秒一次心跳
@@ -21,7 +22,7 @@ const RECONNECT_BASE_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
-  const { t, i18n } = useTranslation(); // [修改点]
+  const { t, i18n } = useTranslation();
   // [新增] 路由检测
   const [isHudMode, setIsHudMode] = useState(false);
 
@@ -47,11 +48,12 @@ function App() {
       await axios.post("http://localhost:8000/api/config/preferences", {
         language: newLang === 'zh' ? '中文' : 'English'
       });
-      toast.success(newLang === 'zh' ? '已切换至中文' : 'Switched to English');
+      toast.success(t('common.lang_switched'));
     } catch (e) {
       console.error("Failed to sync preference to backend");
     }
   };
+  
   // 使用 Ref 避免闭包陷阱
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
@@ -68,18 +70,18 @@ function App() {
     const socket = new WebSocket(WS_URL);
     wsRef.current = socket;
       
-      socket.onopen = () => {
+    socket.onopen = () => {
       console.log("[WS] Connected");
-        setIsConnected(true);
+      setIsConnected(true);
       reconnectAttempts.current = 0; // 重置重连次数
       setWs(socket);
       if (!isHudMode) toast.success("Resonance Core Connected"); // HUD 模式减少干扰
       startHeartbeat();
-      };
+    };
       
     socket.onclose = (event) => {
       console.warn("[WS] Closed", event.code);
-        setIsConnected(false);
+      setIsConnected(false);
       setWs(null);
       stopHeartbeat();
       
@@ -94,38 +96,37 @@ function App() {
         reconnectAttempts.current += 1;
         connect();
       }, delay);
-      };
+    };
 
-      socket.onerror = (err) => {
+    socket.onerror = (err) => {
       console.error("[WS] Error:", err);
       // onerror 之后通常会触发 onclose，所以逻辑在 onclose 处理
-        socket.close();
-      };
+      socket.close();
+    };
 
     socket.onmessage = (event) => {
-        try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'sentinel_alert') {
-        // [修复 Bug ②] 使用 id 属性防止重复弹窗
-        // 我们使用 data.content 作为基础哈希，确保相同内容的消息不会重复显示
-        const toastId = btoa(encodeURIComponent(data.content)).slice(0, 16);
-        
-        toast.warning("Sentinel Triggered!", {
-          id: toastId, // <--- 关键修复：Sonner 会自动去重
-          description: data.content,
-              action: { label: "View", onClick: () => setActiveTab('sentinel') },
-              duration: 6000,
-        });
-      }
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'sentinel_alert') {
+          // [修复 Bug ②] 使用 id 属性防止重复弹窗
+          // 我们使用 data.content 作为基础哈希，确保相同内容的消息不会重复显示
+          const toastId = btoa(encodeURIComponent(data.content)).slice(0, 16);
+          
+          toast.warning("Sentinel Triggered!", {
+            id: toastId, // <--- 关键修复：Sonner 会自动去重
+            description: data.content,
+            action: { label: t('nav.sentinel'), onClick: () => setActiveTab('sentinel') },
+            duration: 6000,
+          });
+        }
         // 处理心跳回应 (如果后端有 pong)
         if (data.type === 'pong') {
-           // console.debug("Heartbeat pong received");
+          // console.debug("Heartbeat pong received");
         }
       } catch (e) {
         // 忽略解析错误，交给组件处理
       }
     };
-
   }, []);
 
   const startHeartbeat = () => {
@@ -144,7 +145,7 @@ function App() {
 
   const stopHeartbeat = () => {
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-    };
+  };
 
   // 初始启动
   useEffect(() => {
@@ -189,18 +190,18 @@ function App() {
           </div>
 
           <nav className="space-y-1">
-            <NavItem active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} icon={Terminal} label="Chat Console" />
+            <NavItem active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} icon={Terminal} label={t('nav.chat')} />
             
             {/* [新增] Skill Store 导航 */}
-            <NavItem active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} icon={Package} label="Skill Store" />
+            <NavItem active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} icon={Package} label={t('nav.skills')} />
             
-            <NavItem active={activeTab === 'sentinel'} onClick={() => setActiveTab('sentinel')} icon={Shield} label="Sentinel System" />
-            <NavItem active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={Database} label="Memory Core" />
-            <NavItem active={activeTab === 'monitor'} onClick={() => setActiveTab('monitor')} icon={Activity} label="System Monitor" />
+            <NavItem active={activeTab === 'sentinel'} onClick={() => setActiveTab('sentinel')} icon={Shield} label={t('nav.sentinel')} />
+            <NavItem active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={Database} label={t('nav.memory')} />
+            <NavItem active={activeTab === 'monitor'} onClick={() => setActiveTab('monitor')} icon={Activity} label={t('nav.monitor')} />
             
             <div className="pt-6 pb-2">
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-4 mb-2">Configuration</div>
-              <NavItem active={activeTab === 'config'} onClick={() => setActiveTab('config')} icon={Settings} label="Model Settings" />
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-4 mb-2">{t('nav.config_title')}</div>
+              <NavItem active={activeTab === 'config'} onClick={() => setActiveTab('config')} icon={Settings} label={t('nav.settings')} />
             </div>
           </nav>
         </div>
@@ -241,10 +242,10 @@ function App() {
         <div className="absolute top-0 left-0 w-full h-64 bg-gradient-to-b from-white to-transparent pointer-events-none z-0" />
         
         <div className="flex-1 z-10 overflow-hidden relative">
-        {activeTab === 'chat' && <ChatInterface ws={ws} isConnected={isConnected} />}
+          {activeTab === 'chat' && <ChatInterface ws={ws} isConnected={isConnected} />}
           {activeTab === 'skills' && <SkillStore />}
-        {activeTab === 'sentinel' && <SentinelDashboard />}
-        {activeTab === 'monitor' && <SystemMonitor />}
+          {activeTab === 'sentinel' && <SentinelDashboard />}
+          {activeTab === 'monitor' && <SystemMonitor />}
           {activeTab === 'memory' && <MemoryManager />}
           {activeTab === 'config' && <ModelConfig />}
         </div>

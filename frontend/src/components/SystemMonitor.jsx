@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { useTranslation } from 'react-i18next';
 import { Cpu, Database, Battery, Zap, Activity, HardDrive, RefreshCw } from 'lucide-react';
 
 const API_BASE = "http://localhost:8000/api";

@@ -18,7 +18,8 @@
     "offline": "System Offline",
     "welcome": "System Ready",
     "aborted": "🛑 Aborted by User",
-    "supervisor": "👮 Supervisor Intervention"
+    "supervisor": "👮 Supervisor Intervention",
+    "main_process": "Resonance Main"
   },
   "skills": {
     "title": "Skill Store",
@@ -44,18 +45,32 @@
   "memory": {
     "title": "Memory Core",
     "subtitle": "Manage long-term vector knowledge base (RAG).",
-    "strategy_semantic": "Semantic",
-    "strategy_hybrid": "Hybrid (Time-Weighted)",
+    "strategy":{
+        "semantic": "Semantic",
+        "hybrid": "Hybrid (Time-Weighted)"
+    } ,
+    "id": "id",
+    "created": "Created At",
     "total_vectors": "Total Vectors",
     "active_7d": "Active (7 Days)",
     "search_placeholder": "Search memory contents, tags...",
-    "sort_time": "Sort: Newest First",
-    "sort_hits": "Sort: Most Recalled",
-    "sort_access": "Sort: Recently Accessed",
-    "col_type": "Type",
-    "col_content": "Content",
-    "col_strength": "Recall Strength",
-    "col_last": "Last Access"
+    "sort": {
+        "time": "Sort: Newest First",
+        "relevance": "Sort: Most Recalled",
+        "accessed": "Sort: Recently Accessed"
+    },
+    "col": {
+        "type": "Type",
+        "content": "Content",
+        "strength": "Recall Strength",
+        "last": "Last Access"
+    },
+    "table": {
+        "type": "Type",
+        "content": "Content",
+        "strength": "Recall Frequency",
+        "last_access": "Last Time Accessed By Agent"
+    }
   },
   "settings": {
     "title": "Model Configuration",
@@ -82,6 +97,15 @@
     "clear_chat_confirm": "Clear all messages in this chat?",
     "success": "Success",
     "failed": "Failed",
-    "lang_switched": "Language switched"
+    "lang_switched": "Language switched",
+    "online": "System Online",
+    "refresh": "Refresh"
+  },
+  "hud": {
+    "title": "Resonance",
+    "current_task": "Current Task",
+    "all_tasks_completed":"All tasks completed.",
+    "placeholder": "Continue to ask",
+    "thinking": "Thinking..."
   }
 }

@@ -14,6 +14,8 @@ from core.rag_store import RAGStore
 from core.sentinel_engine import SentinelEngine
 from core.skill_manager import SkillManager  # [新增]
 
+DEBUG = True
+
 class HostAgent:
     def __init__(self, default_session="resonance_main", config_path="config/config.yaml"):
         # [修改点] 默认会话ID
@@ -168,37 +170,48 @@ class HostAgent:
         self.active_skill = None
         return f"Skill '{prev_skill}' deactivated. Returned to General Mode."
 
-    def _build_dynamic_system_prompt(self, relevant_memories: list, memory_instance: ConversationMemory):
+    def _build_dynamic_system_prompt(self, relevant_memories: list, memory_instance: ConversationMemory, original_query: str = None):
         """
         构建高级结构化 Prompt
         包含：身份、工具能力、用户画像、长期记忆(RAG)、当前对话摘要
         """
         # 1. 基础身份设定
         base_identity = """
-Role: Resonance (Advanced AI Host for Windows)
-Objective: Assist the user by executing local commands, managing files, and planning complex tasks.
-Environment: Windows 11, PowerShell.
+1. **PLAN FIRST.** For any task requiring more than one step (e.g., "compare papers", "build project"), you MUST output a `<plan>` block before taking any action.
+   Example:
+   <plan>
+   1. Search for papers about X.
+   2. Download the top 3 PDFs.
+   3. Read abstract of each.
+   4. Synthesize comparison.
+   </plan>
+   
+2. **Context Anchoring.** ALWAYS keep the user's *original intent* in mind. Do not let retrieved memories (which might be about old topics) distract you from the current specific request.
 
-Core Principles:
-1. **Plan Before Acting.** When complex tasks arise, break them down.
-You should plan and list all needed actions, then start to execute them step by step.
-2. **Explore then Act.** When asked to find information in files, DO NOT guess. Use 'list_directory_files' or 'search_files_by_keyword' first, then 'read_file_content'.
-3. **Multi-Step Tool Use.** You can use multiple tools or use tools multiple times in a sequence to complete a task. Analyze the output of each tool before proceeding.
+3. **Explore then Act.** When asked to find information in files, DO NOT guess. Use 'list_directory_files' or 'search_files_by_keyword' first.
+
 4. **Robustness.** If a command fails, analyze the error and try a different approach.
-5. **Memory.** You have access to long-term memory. Use it to recall user preferences and past projects.
-6. **Autonomy (Sentinels).** You have a 'Sentinel System'. You can set triggers of Time, File, Behavior to wake yourself up later. Use this to be proactive.
-7. **Anthropics Skills.**    
-    - You have a 'Skill Index'. DO NOT hallucinate tools. 
-   - To use a specialized capability (e.g., advanced coding, browser auto), you MUST use 'manage_skills' to ACTIVATE it first.
-   - Once a skill is active, you will receive its SOP (Standard Operating Procedure). Follow it RIGIDLY.
-8. **Security.** If not required, don't create unnecessary files or change something recklessly.
+
+5. **Active Memory.** You have access to a long-term Vector Memory. 
+   - You can query it using `search_long_term_memory` if the context is missing.
+   - You can SAVE important findings using `add_long_term_memory`.
+   - You can DELETE obsolete facts using `delete_long_term_memory`.
+
+6. **Anthropics Skills.**    
+    - To use a specialized capability, use 'manage_skills' to ACTIVATE it first.
+    - Once active, follow the SOP RIGIDLY.
 
 Tool Use Reminders:
 You have a limit on how many tools you can use in one session. Use them wisely.
 If you hit the limit, you will be given a chance to reflect and continue if necessary.
+Or, if user continue to chat with you, the limit will be reset too.
 """
-        
-        # 2. 用户画像注入
+        # 2. 锚定原始请求
+        anchor_section = ""
+        if original_query:
+            anchor_section = f"\n[CRITICAL ANCHOR]\nOriginal User Intent: \"{original_query}\"\n(Align all actions to fulfill this specific request. Ignore retrieved memories if they conflict with this intent.)\n"
+
+        # 3. 注入用户画像
         user_section = "\n[User Profile & Preferences]\n"
         user_info = self.user_data.get('user_info', {})
         known_projects = self.user_data.get('known_projects', {})
@@ -218,7 +231,6 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
             if sop_text:
                 skill_section = f"\n\n[🔥 ACTIVE SKILL CONTEXT: {self.active_skill}]\n"
                 skill_section += "!!! CRITICAL: You are now executing a specialized skill. !!!\n"
-                skill_section += "!!! IGNORE general rules if they conflict with the SOP below. !!!\n"
                 skill_section += "================ SKILL SOP START ================\n"
                 skill_section += sop_text
                 skill_section += "\n================ SKILL SOP END ==================\n"
@@ -228,13 +240,13 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
             skill_index = self.skill_manager.get_skill_index()
             skill_section = f"\n[Available Skills Index]\n(Use 'manage_skills' to activate one if needed)\n{skill_index}\n"
 
-        # 3. 长期记忆注入 (RAG Results)
+        # 4. 长期记忆注入 (RAG Results)
         rag_section = ""
         if relevant_memories:
-            rag_section = "\n[Relevant Long-term Memories]\n"
+            rag_section = "\n[Relevant Long-term Memories (Reference Only)]\n"
             for mem in relevant_memories:
                 rag_section += f"- {mem}\n"
-            rag_section += "(Use these memories to answer contextually if applicable)\n"
+            rag_section += "(Use these ONLY if they help the *Current* Original Intent.)\n"
 
         # [修改点] 使用传入的 memory_instance
         summary_text = memory_instance.load_summary()
@@ -243,8 +255,10 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
             summary_section = f"\n[Previous Conversation Summary]\n{summary_text}\n(This is what happened before the current chat window)\n"
 
         # 组合 Prompt
-        full_prompt = base_identity + user_section + skill_section + rag_section + summary_section
-        
+        full_prompt = base_identity + anchor_section + user_section + skill_section + rag_section + summary_section
+
+        if DEBUG:
+            print(f"[DEBUG] Full Prompt:{full_prompt}")
         return full_prompt
 
     def _update_summary_if_needed(self, memory_instance: ConversationMemory):
@@ -299,6 +313,7 @@ If you hit the limit, you will be given a chance to reflect and continue if nece
         """
         后台线程任务：分析对话，萃取有价值的信息存入向量库。
         避免将垃圾对话（"你好", "嗯"）存入。
+        注意：现在我们也有 Active Memory 工具，两者并行。
         """
         try:
             # [BUG FIX Check]
@@ -345,7 +360,7 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
                 )
                 if success:
                     # 在日志中静默记录，用于调试，不干扰主线程输出
-                    print(f"[Memory System]: Memory Extracted. Archived -> {extracted_info}")
+                    print(f"[Memory System]: Auto Memory Extracted. Archived -> {extracted_info}")
                     pass
 
         except Exception as e:
@@ -467,8 +482,8 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
                 strategy=rag_strategy  # <--- 传入参数
             )
             
-            # 构建动态 System Prompt
-            dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory)
+            # [关键修改] 传递 user_input 作为 original_query
+            dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory, original_query=user_input)
             
             # messages 列表将作为我们在这一轮推理中的“工作区”
             messages = [{"role": "system", "content": dynamic_sys_prompt}]
@@ -679,9 +694,17 @@ Proceed with the next step immediately.
         try:
             # 检查是否有高优先级的打断
             if stop_event and stop_event.is_set():
-                return "[System]: Tool execution cancelled by user."
+                return "[System]: Tool execution cancelled."
 
-            # 1. Manage Skills
+            # [新增] 路由 Active Memory Tools
+            if function_name == "search_long_term_memory":
+                return self.toolbox.search_long_term_memory(args.get("query"))
+            elif function_name == "add_long_term_memory":
+                return self.toolbox.add_long_term_memory(args.get("text"), args.get("tag"))
+            elif function_name == "delete_long_term_memory":
+                return self.toolbox.delete_long_term_memory(args.get("memory_id"))
+
+            # ... Existing Routes ...
             if function_name == "manage_skills":
                 return self.toolbox.manage_skills(args.get("action"), args.get("skill_name"))
             
@@ -705,9 +728,7 @@ Proceed with the next step immediately.
             elif function_name == "execute_shell_command":
                 return self.toolbox.execute_shell(args.get("command"), stop_event=stop_event)
                 
-            elif function_name == "add_automation_skill":
-                return self.toolbox.add_new_script(args.get("alias"), args.get("command"), args.get("description"))
-                
+
             elif function_name == "scan_directory_projects":
                 # 这里只负责返回扫描结果字符串
                 return self.toolbox.scan_and_remember(args.get("path"))

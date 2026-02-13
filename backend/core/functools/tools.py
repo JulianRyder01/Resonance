@@ -1,7 +1,5 @@
 # core/functools/tools.py
-# [修改说明] 修复了Windows下subprocess读取输出时的UnicodeDecodeError (GBK编码崩溃)
-# [修改说明] 增强了 execute_shell 的鲁棒性，采用“混合解码”策略
-# [修改说明] 集成 SkillManager 实现动态工具列表
+# [修改说明] 新增主动记忆管理工具
 import os
 import sys
 import subprocess
@@ -46,7 +44,52 @@ class Toolbox:
     def _get_native_tools(self):
         # 1. 基础内置工具
         tools = [
-            # --- 技能管理 (认知负荷管理的核心) ---
+            # --- Active Memory Tools (New) ---
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_long_term_memory",
+                    "description": "Actively search the long-term vector database. Use this when you need to recall past projects, user preferences, or facts that are not in the current context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search query string."}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_long_term_memory",
+                    "description": "Explicitly save a new fact to long-term memory. Use this for important user instructions, project details, or learned solutions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "The content to remember."},
+                            "tag": {"type": "string", "description": "A short tag for categorization, e.g., 'project_info', 'user_preference', 'coding_rule'. Default: 'ai_note'."}
+                        },
+                        "required": ["text"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_long_term_memory",
+                    "description": "Delete a specific memory entry by ID. Use 'search_long_term_memory' first to find the ID if needed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {"type": "string", "description": "The UUID of the memory to delete."}
+                        },
+                        "required": ["memory_id"]
+                    }
+                }
+            },
+
+            # --- 技能管理 ---
             {
                 "type": "function",
                 "function": {
@@ -279,7 +322,31 @@ class Toolbox:
             }
         ]
 
-    # --- 具体实现 ---
+    # --- Active Memory Implementations ---
+    def search_long_term_memory(self, query):
+        """主动搜索记忆"""
+        results = self.agent.rag_store.search_memory(query, n_results=5, strategy="hybrid_bm25")
+        if not results:
+            return "No relevant memories found."
+        return "\n".join([f"- {r}" for r in results])
+
+    def add_long_term_memory(self, text, tag="ai_note"):
+        """主动添加记忆"""
+        success = self.agent.rag_store.add_memory(
+            text=text,
+            metadata={
+                "type": tag,
+                "source": "active_tool_usage"
+            }
+        )
+        return "Memory saved successfully." if success else "Failed to save memory."
+
+    def delete_long_term_memory(self, memory_id):
+        """主动删除记忆"""
+        success = self.agent.rag_store.delete_memory(memory_id)
+        return f"Memory {memory_id} deleted." if success else "Failed to delete memory."
+
+    # --- Other Implementations ---
 
     def manage_skills(self, action, skill_name=None):
         """

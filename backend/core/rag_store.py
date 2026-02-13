@@ -1,4 +1,4 @@
-# core/rag_store.py
+# backend/core/rag_store.py
 import os
 import uuid
 import datetime
@@ -6,14 +6,106 @@ import sys
 import pandas as pd
 import logging
 import traceback
+import math
+import re
+from collections import Counter
+from typing import List, Dict, Any
 
 # 配置日志
 logger = logging.getLogger("RAGStore")
 
+# --- [新增] BM25 算法实现 ---
+class BM25:
+    def __init__(self, corpus: List[str], k1=1.5, b=0.75):
+        """
+        BM25算法的构造器
+        :param corpus: 文档字符串列表
+        :param k1: BM25算法中的调节参数k1
+        :param b: BM25算法中的调节参数b
+        """
+        self.k1 = k1
+        self.b = b
+        self.corpus_size = len(corpus)
+        self.avgdl = 0
+        self.doc_freqs = []
+        self.idf = {}
+        self.doc_len = []
+        
+        # 预处理文档
+        tokenized_corpus = [self.tokenize(doc) for doc in corpus]
+        self._initialize(tokenized_corpus)
+
+    def tokenize(self, text: str) -> List[str]:
+        """
+        简单的混合分词器 (支持中文和英文)
+        生产环境建议替换为 jieba (中文) + split (英文)
+        """
+        if not text:
+            return []
+        # 将文本转小写，匹配连续的字母数字作为单词，或者匹配单个的中文字符
+        # 这是一个简化的正则，能够同时处理 "Hello world" 和 "你好世界"
+        tokens = re.findall(r'(?u)\b\w+\b|[\u4e00-\u9fa5]', text.lower())
+        return tokens
+
+    def _initialize(self, docs):
+        """
+        初始化方法，计算所有词的逆文档频率
+        """
+        self.doc_len = [len(doc) for doc in docs]
+        self.avgdl = sum(self.doc_len) / self.corpus_size if self.corpus_size > 0 else 0
+        
+        df = {}  # 用于存储每个词在多少不同文档中出现
+        
+        for doc in docs:
+            # 为每个文档创建一个词频统计
+            self.doc_freqs.append(Counter(doc))
+            # 更新df值
+            for word in set(doc):
+                df[word] = df.get(word, 0) + 1
+        
+        # 计算每个词的IDF值
+        for word, freq in df.items():
+            self.idf[word] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1)
+
+    def score(self, doc_idx, query_tokens):
+        """
+        计算文档与查询的BM25得分
+        """
+        score = 0.0
+        doc_freq = self.doc_freqs[doc_idx]
+        doc_len = self.doc_len[doc_idx]
+        
+        for word in query_tokens:
+            if word in doc_freq:
+                freq = doc_freq[word]
+                # 应用BM25计算公式
+                numerator = self.idf[word] * freq * (self.k1 + 1)
+                denominator = freq + self.k1 * (1 - self.b + self.b * doc_len / (self.avgdl + 1e-6))
+                score += numerator / denominator
+        return score
+
+    def search(self, query: str, top_k=5):
+        """
+        搜索入口
+        :return: List of (doc_index, score) sorted by score desc
+        """
+        tokens = self.tokenize(query)
+        scores = []
+        for i in range(self.corpus_size):
+            s = self.score(i, tokens)
+            if s > 0:
+                scores.append((i, s))
+        
+        # 按分数降序排列
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:top_k]
+
+# --- RAG Store 主类 ---
+
 class RAGStore:
     """
     负责长期记忆的向量存储与检索。
-    [修复版 v3]: 引入 Lazy Loading 和重试机制，解决启动时初始化失败导致全程不可用的问题。
+    [升级]: 集成 Semantic + BM25 混合检索 (70/30)
     """
     def __init__(self, persistence_path="./logs/vector_store", collection_name="resonance_memory"):
         self.persistence_path = os.path.abspath(persistence_path)
@@ -21,6 +113,10 @@ class RAGStore:
         self.embedding_function = None
         self.client = None
         self.collection = None
+        
+        # [新增] 内存中的 BM25 索引缓存
+        self.bm25_index = None
+        self.memory_docs_cache = [] # 存储 (id, text, metadata) 的列表，与 BM25 索引对应
         
         # 确保目录存在
         if not os.path.exists(self.persistence_path):
@@ -31,13 +127,12 @@ class RAGStore:
 
         print(f"[RAG Init]: Target Path -> {self.persistence_path}")
 
-        # 尝试初始化（如果失败不阻断程序，依靠后续的 Lazy Load）
+        # 尝试初始化
         self._initialize_db()
 
     def _initialize_db(self):
         """
-        核心初始化逻辑。
-        分离出来是为了支持失败后的重试。
+        核心初始化逻辑，连接 ChromaDB 并构建内存 BM25 索引
         """
         try:
             # 1. 导入依赖 (如果在 __init__ 外导入可能会导致某些环境下的 DLL 冲突)
@@ -62,6 +157,10 @@ class RAGStore:
             
             count = self.collection.count()
             print(f"[RAG System]: ✅ Successfully connected. Records: {count}")
+            
+            # [新增] 5. 构建 BM25 索引 (加载所有数据)
+            self._rebuild_bm25_index()
+            
             return True
 
         except Exception as e:
@@ -75,6 +174,45 @@ class RAGStore:
             
             self.collection = None
             return False
+
+    def _rebuild_bm25_index(self):
+        """
+        [新增] 从 ChromaDB 拉取所有数据并重建 BM25 索引
+        注意：数据量极大时需优化，此处适用于一般个人 Agent 规模 (<10w 条)
+        """
+        try:
+            if not self.collection: return
+            
+            count = self.collection.count()
+            if count == 0:
+                self.bm25_index = None
+                self.memory_docs_cache = []
+                return
+
+            # 拉取所有数据
+            all_data = self.collection.get()
+            ids = all_data['ids']
+            documents = all_data['documents']
+            metadatas = all_data['metadatas']
+            
+            self.memory_docs_cache = []
+            corpus = []
+            
+            for i, doc_id in enumerate(ids):
+                text = documents[i] if documents[i] else ""
+                self.memory_docs_cache.append({
+                    "id": doc_id,
+                    "document": text,
+                    "metadata": metadatas[i]
+                })
+                corpus.append(text)
+            
+            # 初始化 BM25
+            self.bm25_index = BM25(corpus)
+            # print(f"[RAG System]: BM25 Index rebuilt with {len(corpus)} documents.")
+            
+        except Exception as e:
+            print(f"[RAG Error] Failed to rebuild BM25 index: {e}")
 
     def _ensure_connection(self):
         """
@@ -94,8 +232,10 @@ class RAGStore:
         if metadata is None:
             metadata = {}
         
+        # 确保时间戳
         metadata['timestamp'] = datetime.datetime.now().isoformat()
-        metadata['type'] = metadata.get('type', 'general')
+        # [修改] 允许传入 AI 标签，如果没有则默认为 general
+        metadata['type'] = metadata.get('type', 'general') 
         metadata['access_count'] = 0
         metadata['last_accessed'] = metadata['timestamp']
 
@@ -105,12 +245,19 @@ class RAGStore:
                 metadatas=[metadata],
                 ids=[str(uuid.uuid4())]
             )
+            # [新增] 插入数据后，简单的做法是重建索引 (或者可以优化为增量更新)
+            # 为了数据一致性，这里选择重建（假设写入频率远低于读取）
+            self._rebuild_bm25_index()
             return True
         except Exception as e:
             print(f"[RAG Error] Add failed: {e}")
             return False
 
-    def search_memory(self, query_text, n_results=3, strategy="semantic"):
+    def search_memory(self, query_text, n_results=3, strategy="hybrid_bm25"):
+        """
+        检索入口
+        :param strategy: 'semantic', 'hybrid_time', 'hybrid_bm25' (default)
+        """
         if not self._ensure_connection():
             return []
 
@@ -118,12 +265,17 @@ class RAGStore:
             # 保证 n_results 不超过总数
             count = self.collection.count()
             if count == 0: return []
+            
+            # 确保获取足够多的候选集以便重排序
             k = min(n_results, count)
 
-            if strategy == "hybrid_time":
+            if strategy == "hybrid_bm25":
+                return self._search_hybrid_bm25(query_text, k)
+            elif strategy == "hybrid_time":
                 return self._search_hybrid_time(query_text, k)
             else:
                 return self._search_semantic(query_text, k)
+                
         except Exception as e:
             print(f"[RAG Error] Search failed: {e}")
             return []
@@ -142,7 +294,7 @@ class RAGStore:
         return []
 
     def _search_hybrid_time(self, query_text, n_results):
-        # 获取更多候选项
+        """语义 + 时间衰减"""
         candidates_k = min(n_results * 3, self.collection.count())
         results = self.collection.query(
             query_texts=[query_text],
@@ -180,11 +332,101 @@ class RAGStore:
         scored.sort(key=lambda x: x['score'], reverse=True)
         top = scored[:n_results]
         
-        # 更新统计
         try:
             self._increment_stats([x['id'] for x in top], [x['meta'] for x in top])
         except: pass
 
+        return [x['doc'] for x in top]
+
+    def _search_hybrid_bm25(self, query_text, n_results):
+        """
+        [新增] 语义 70% + BM25 30% 混合检索
+        """
+        # 1. 语义检索 (获取较多候选项，例如 n * 4)
+        top_k_candidates = min(n_results * 4, self.collection.count())
+        
+        # Semantic Search
+        sem_results = self.collection.query(
+            query_texts=[query_text],
+            n_results=top_k_candidates,
+            include=['documents', 'metadatas', 'distances']
+        )
+        
+        # 2. BM25 检索 (在全量内存索引中检索)
+        bm25_results_list = []
+        if self.bm25_index:
+            bm25_results_list = self.bm25_index.search(query_text, top_k=top_k_candidates)
+        
+        # --- 融合逻辑 (Normalization + Weighted Sum) ---
+        
+        # 建立 ID -> {sem_score, bm25_score, content, metadata} 的映射
+        candidates = {}
+        
+        # 处理语义结果
+        sem_max_score = 0.0
+        if sem_results and sem_results['ids'] and sem_results['ids'][0]:
+            ids = sem_results['ids'][0]
+            docs = sem_results['documents'][0]
+            metas = sem_results['metadatas'][0]
+            dists = sem_results['distances'][0]
+            
+            for i, doc_id in enumerate(ids):
+                # Distance to Similarity: 1 / (1 + distance)
+                sim = 1.0 / (1.0 + dists[i])
+                sem_max_score = max(sem_max_score, sim)
+                candidates[doc_id] = {
+                    "doc": docs[i],
+                    "meta": metas[i],
+                    "sem_score": sim,
+                    "bm25_score": 0.0
+                }
+        
+        # 处理 BM25 结果
+        bm25_max_score = 0.0
+        if bm25_results_list:
+            bm25_max_score = bm25_results_list[0][1] # Sorted desc
+            for idx, score in bm25_results_list:
+                # 从 cache 找回文档信息
+                if idx < len(self.memory_docs_cache):
+                    cached_item = self.memory_docs_cache[idx]
+                    doc_id = cached_item['id']
+                    
+                    if doc_id not in candidates:
+                        candidates[doc_id] = {
+                            "doc": cached_item['document'],
+                            "meta": cached_item['metadata'],
+                            "sem_score": 0.0,
+                            "bm25_score": score
+                        }
+                    else:
+                        candidates[doc_id]["bm25_score"] = score
+
+        # 归一化并加权
+        # 权重: Semantic 0.7, BM25 0.3
+        final_scores = []
+        for doc_id, data in candidates.items():
+            # Min-Max Normalization (Simple)
+            norm_sem = data["sem_score"] / sem_max_score if sem_max_score > 0 else 0
+            norm_bm25 = data["bm25_score"] / bm25_max_score if bm25_max_score > 0 else 0
+            
+            weighted_score = (0.7 * norm_sem) + (0.3 * norm_bm25)
+            
+            final_scores.append({
+                "id": doc_id,
+                "doc": data["doc"],
+                "meta": data["meta"],
+                "score": weighted_score
+            })
+            
+        # 排序
+        final_scores.sort(key=lambda x: x['score'], reverse=True)
+        top = final_scores[:n_results]
+        
+        # 更新访问统计
+        try:
+            self._increment_stats([x['id'] for x in top], [x['meta'] for x in top])
+        except: pass
+        
         return [x['doc'] for x in top]
 
     def _increment_stats(self, ids, metadatas):
@@ -200,6 +442,8 @@ class RAGStore:
         if not self._ensure_connection(): return False
         try:
             self.collection.delete(ids=[memory_id])
+            # 删除后重建索引以保持一致
+            self._rebuild_bm25_index()
             return True
         except Exception as e:
             print(f"[RAG Error] Delete failed: {e}")

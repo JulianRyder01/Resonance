@@ -104,15 +104,18 @@ class ConversationMemory:
         """保存 AI 发起的工具调用请求"""
         serializable_calls = []
         for call in tool_calls:
-            serializable_calls.append({
-                "id": call.id,
-                "type": "function",
-                "function": {
-                    "name": call.function.name,
-                    "arguments": call.function.arguments
-                }
-            })
-            
+            # 兼容不同格式
+            if isinstance(call, dict):
+                serializable_calls.append(call)
+            else:
+                serializable_calls.append({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments
+                    }
+                })
         self._append_message({
             "role": "assistant", 
             "content": content, # 通常为 None 或思维链内容

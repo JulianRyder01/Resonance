@@ -84,7 +84,7 @@ class HostAgent:
         """[新增] 获取指定会话的内存对象，如果不存在则创建并缓存"""
         sid = session_id or self.active_session_id
         if sid not in self.memory_cache:
-            win_size = self.config.get('system', {}).get('memory', {}).get('window_size', 10)
+            win_size = self.config.get('system', {}).get('memory', {}).get('window_size', 15) # [修改] 增加默认窗口大小
             self.memory_cache[sid] = ConversationMemory(session_id=sid, window_size=win_size)
         return self.memory_cache[sid]
 
@@ -180,7 +180,7 @@ class HostAgent:
         base_identity = """
 You are Resonance, an advanced Windows AI Host.
 
-### CORE OPERATING PROTOCOLS (MUST FOLLOW):
+### CORE OPERATING PROTOCOLS MUST FOLLOW:
 
 1.  **PLAN FIRST (MANDATORY)**: 
     For ANY task that is not a simple greeting, you MUST start your response with a structured plan block using the `<plan>` XML tag.
@@ -215,11 +215,23 @@ You have a limit on how many tools you can use in one session. Use them wisely.
 If you hit the limit, you will be given a chance to reflect and continue if necessary.
 Or, if user continue to chat with you, the limit will be reset too.
 """
-        # 2. 锚定原始请求
-        anchor_section = ""
-        if original_query:
-            anchor_section = f"\n### CURRENT MISSION ANCHOR\nUser's Original Request: \"{original_query}\"\n(Align all actions to complete this specific request. Do not get distracted.)\n"
-
+        messages = memory_instance.get_full_log()
+        latest_plan = ""
+        # 倒序查找最近的包含 <plan> 的 Assistant 消息
+        for msg in reversed(messages):
+            if msg.get('role') == 'assistant' and '<plan>' in msg.get('content', ''):
+                # 提取 plan 内容
+                match = re.search(r'<plan>(.*?)</plan>', msg['content'], re.DOTALL)
+                if match:
+                    latest_plan = match.group(1).strip()
+                    break
+        
+        plan_injection = ""
+        if latest_plan:
+            plan_injection = f"\n\n### 📋 CURRENT ACTIVE PLAN (RESURRECTED)\nUser previously agreed to this plan. CONTINUE EXECUTION:\n<plan>\n{latest_plan}\n</plan>\n(Update this status in your next response based on recent tool outputs.)\n"
+        elif original_query:
+            # 如果没有历史计划，但有新请求，提示建立计划
+            plan_injection = f"\n\n### 🆕 NEW MISSION DETECTED\nUser Request: \"{original_query}\"\nACTION: Generate a <plan> immediately.\n"
         # 3. 注入用户画像
         user_section = "\n### USER PROFILE\n"
         user_info = self.user_data.get('user_info', {})
@@ -259,7 +271,7 @@ Or, if user continue to chat with you, the limit will be reset too.
             summary_section = f"\n### PREVIOUS CONVERSATION SUMMARY\n{summary_text}\n"
 
         # 组合 Prompt
-        full_prompt = base_identity + anchor_section + user_section + skill_section + rag_section + summary_section
+        full_prompt = base_identity + plan_injection + user_section + skill_section + rag_section + summary_section
 
         if DEBUG:
             print(f"[DEBUG] Full Prompt:{full_prompt}")
@@ -271,7 +283,7 @@ Or, if user continue to chat with you, the limit will be reset too.
             return
 
         full_log = memory_instance.get_full_log()
-        if len(full_log) > 0 and len(full_log) % 10 == 0:
+        if len(full_log) > 0 and len(full_log) % 15 == 0:
             text_to_summarize = memory_instance.get_messages_for_summarization()
             if not text_to_summarize:
                 return
@@ -300,13 +312,15 @@ Or, if user continue to chat with you, the limit will be reset too.
                 response = self.client.chat.completions.create(
                     model=self.current_model_config['model'],
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
+                    temperature=0.3,
+                    max_tokens=1000
                 )
                 
                 new_summary = response.choices[0].message.content
                 self.memory.save_summary(new_summary)
                 print(f"[System]: Memory summarized. Length: {len(new_summary)}")
-                print(f"[System]: Memory preview: {new_summary}")
+                if DEBUG:
+                    print(f"[DEBUG]: [System]: Memory preview: {new_summary}")
             except Exception as e:
                 print(f"[Warning] Failed to generate summary: {e}")
 
@@ -353,19 +367,33 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             
             # 3. 存储逻辑
             if extracted_info and "NO_INFO" not in extracted_info:
-                # 存入向量库
-                success = self.rag_store.add_memory(
-                    text=extracted_info,
-                    metadata={
-                        "type": "conversation_insight",
-                        "session": session_id,
-                        "original_user_input": turn_events_log[:50]
-                    }
-                )
-                if success:
-                    # 在日志中静默记录，用于调试，不干扰主线程输出
-                    print(f"[Memory System]: Auto Memory Extracted. Archived -> {extracted_info}")
-                    pass
+                # [关键修改] 去重检查 (Dedup Check)
+                # 先用提取出的事实去 RAG 里搜一下
+                existing_docs = self.rag_store.search_memory(extracted_info, n_results=1, strategy="semantic")
+                
+                # 这里做一个简单的文本包含或相似度判断 (这里简化为如果有结果且内容非常接近)
+                # 实际生产中可以计算 embedding cosine similarity > 0.9
+                is_duplicate = False
+                if existing_docs:
+                    top_doc = existing_docs[0]
+                    # 简单的字符串包含检查，防止完全重复
+                    if extracted_info in top_doc or top_doc in extracted_info:
+                        is_duplicate = True
+                        print(f"[Memory]: Skip duplicate fact: {extracted_info[:30]}...")
+
+                if not is_duplicate:
+                    success = self.rag_store.add_memory(
+                        text=extracted_info,
+                        metadata={
+                            "type": "conversation_insight",
+                            "session": session_id,
+                            "original_user_input": turn_events_log[:50]
+                        }
+                    )
+                    if success:
+                        # 在日志中静默记录，用于调试，不干扰主线程输出
+                        print(f"[Memory System]: Auto Memory Extracted. Archived -> {extracted_info}")
+                        pass
 
         except Exception as e:
             # 这里的异常绝对不能影响主线程
@@ -475,7 +503,7 @@ Response (JSON Only):
             relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k, strategy=rag_strategy)
             
             # 督战循环限制
-            MAX_SUPERVISOR_LOOPS = 3
+            MAX_SUPERVISOR_LOOPS = 4
             supervisor_loops = 0
             
             while supervisor_loops <= MAX_SUPERVISOR_LOOPS:

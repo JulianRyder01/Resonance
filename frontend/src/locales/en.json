@@ -1,0 +1,87 @@
+{
+  "nav": {
+    "chat": "Chat Console",
+    "skills": "Skill Store",
+    "sentinel": "Sentinel System",
+    "memory": "Memory Core",
+    "monitor": "System Monitor",
+    "settings": "Model Settings",
+    "config_title": "Configuration"
+  },
+  "chat": {
+    "new_chat": "New Chat",
+    "placeholder": "Message {{session}}...",
+    "stop": "Stop",
+    "clear": "Clear",
+    "typing": "AI is thinking...",
+    "online": "System Online",
+    "offline": "System Offline",
+    "welcome": "System Ready",
+    "aborted": "🛑 Aborted by User",
+    "supervisor": "👮 Supervisor Intervention"
+  },
+  "skills": {
+    "title": "Skill Store",
+    "subtitle": "Manage agent capabilities and external plugins.",
+    "import_title": "Import New Skill",
+    "placeholder": "Paste GitHub URL or local absolute path...",
+    "learn_btn": "Learn",
+    "help_text": "Supported: Resonance Scripts, Anthropic MCP Skills, or Python Projects.",
+    "imported_tag": "Imported Skills",
+    "legacy_tag": "Legacy Scripts",
+    "empty": "No imported skills yet. Try adding one above."
+  },
+  "monitor": {
+    "title": "System Resources",
+    "subtitle": "Real-time performance telemetry.",
+    "cpu": "CPU Usage",
+    "mem": "Memory (RAM)",
+    "battery": "Battery Status",
+    "process_title": "Top Resource Consumers",
+    "disk_title": "Drive Storage",
+    "tip_title": "Agent Tip"
+  },
+  "memory": {
+    "title": "Memory Core",
+    "subtitle": "Manage long-term vector knowledge base (RAG).",
+    "strategy_semantic": "Semantic",
+    "strategy_hybrid": "Hybrid (Time-Weighted)",
+    "total_vectors": "Total Vectors",
+    "active_7d": "Active (7 Days)",
+    "search_placeholder": "Search memory contents, tags...",
+    "sort_time": "Sort: Newest First",
+    "sort_hits": "Sort: Most Recalled",
+    "sort_access": "Sort: Recently Accessed",
+    "col_type": "Type",
+    "col_content": "Content",
+    "col_strength": "Recall Strength",
+    "col_last": "Last Access"
+  },
+  "settings": {
+    "title": "Model Configuration",
+    "subtitle": "Manage LLM profiles and select the active brain.",
+    "add_profile": "Add Profile",
+    "active": "Active",
+    "activate_btn": "Activate",
+    "edit": "Edit",
+    "delete": "Delete",
+    "modal_new": "New Profile",
+    "modal_edit": "Edit Profile",
+    "id_label": "Profile ID (Unique)",
+    "name_label": "Display Name",
+    "provider_label": "Provider",
+    "url_label": "Base URL",
+    "model_label": "Model Name",
+    "temp_label": "Temperature",
+    "key_label": "API Key",
+    "save_btn": "Save Profile"
+  },
+  "common": {
+    "delete_confirm": "Are you sure?",
+    "delete_memory_confirm": "Permanently delete this memory?",
+    "clear_chat_confirm": "Clear all messages in this chat?",
+    "success": "Success",
+    "failed": "Failed",
+    "lang_switched": "Language switched"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "nav": {
+    "chat": "对话控制台",
+    "skills": "技能商店",
+    "sentinel": "哨兵系统",
+    "memory": "记忆核心",
+    "monitor": "系统监控",
+    "settings": "模型设置",
+    "config_title": "配置选项"
+  },
+  "chat": {
+    "new_chat": "开启新对话",
+    "placeholder": "给 {{session}} 发送消息...",
+    "stop": "停止响应",
+    "clear": "清空历史",
+    "typing": "AI 正在思考...",
+    "online": "系统在线",
+    "offline": "系统离线",
+    "welcome": "系统就绪",
+    "aborted": "🛑 用户中断了任务",
+    "supervisor": "👮 督战员介入"
+  },
+  "skills": {
+    "title": "技能商店",
+    "subtitle": "管理 Agent 的核心能力和外部插件",
+    "import_title": "导入新技能",
+    "placeholder": "粘贴 GitHub 链接或本地绝对路径...",
+    "learn_btn": "学习技能",
+    "help_text": "支持：Resonance 脚本, Anthropic MCP 技能 (YAML), 或标准 Python 项目。",
+    "imported_tag": "已导入技能",
+    "legacy_tag": "预定义脚本",
+    "empty": "暂无技能，请尝试在上方导入"
+  },
+  "monitor": {
+    "title": "系统资源",
+    "subtitle": "实时硬件性能遥测",
+    "cpu": "CPU 使用率",
+    "mem": "内存 (RAM)",
+    "battery": "电池状态",
+    "process_title": "高资源占用进程",
+    "disk_title": "磁盘存储",
+    "tip_title": "智能提示"
+  },
+  "memory": {
+    "title": "记忆核心",
+    "subtitle": "管理长期向量知识库 (RAG)",
+    "strategy_semantic": "语义检索",
+    "strategy_hybrid": "混合 (时间权重)",
+    "total_vectors": "总向量数",
+    "active_7d": "最近7天活跃",
+    "search_placeholder": "搜索记忆内容、标签...",
+    "sort_time": "按时间排序",
+    "sort_hits": "按召回次数排序",
+    "sort_access": "按最近访问排序",
+    "col_type": "类型",
+    "col_content": "内容",
+    "col_strength": "召回强度",
+    "col_last": "最后访问"
+  },
+  "settings": {
+    "title": "模型配置",
+    "subtitle": "管理 LLM 配置文件并选择当前大脑",
+    "add_profile": "添加配置",
+    "active": "正在使用",
+    "activate_btn": "激活",
+    "edit": "编辑",
+    "delete": "删除",
+    "modal_new": "新建配置文件",
+    "modal_edit": "编辑配置文件",
+    "id_label": "唯一标识符 (ID)",
+    "name_label": "显示名称",
+    "provider_label": "供应商",
+    "url_label": "Base URL",
+    "model_label": "模型名称",
+    "temp_label": "温度 (Temp)",
+    "key_label": "API Key",
+    "save_btn": "保存配置"
+  },
+  "common": {
+    "delete_confirm": "确定要删除吗？",
+    "delete_memory_confirm": "确定要永久删除这条记忆吗？",
+    "clear_chat_confirm": "要清空当前对话的所有记录吗？",
+    "success": "操作成功",
+    "failed": "操作失败",
+    "lang_switched": "语言已切换"
+  }
+}

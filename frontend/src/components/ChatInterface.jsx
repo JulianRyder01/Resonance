@@ -1,5 +1,6 @@
 // frontend/src/components/ChatInterface.jsx
 import React, { useState, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import axios from 'axios';
 import { 
@@ -42,6 +43,7 @@ const ToolMessage = ({ name, content }) => {
 };
 
 export default function ChatInterface({ ws, isConnected }) {
+  const { t } = useTranslation();
   // 会话状态
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState("resonance_main");
@@ -374,7 +376,7 @@ export default function ChatInterface({ ws, isConnected }) {
             onClick={createSession}
             className="w-full flex items-center justify-center gap-2 bg-white border border-border hover:border-primary text-slate-600 hover:text-primary py-2.5 rounded-lg transition-all shadow-sm font-medium text-sm"
           >
-            <Plus size={16} /> New Chat
+            <Plus size={16} /> {t('chat.new_chat')}
           </button>
         </div>
         
@@ -458,7 +460,7 @@ export default function ChatInterface({ ws, isConnected }) {
                 onClick={handleInterrupt}
                 className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors border border-red-100"
               >
-                <StopCircle size={14} /> Stop
+                <StopCircle size={14} /> {t('chat.stop')}
               </button>
             )}
             <button 
@@ -518,7 +520,7 @@ export default function ChatInterface({ ws, isConnected }) {
                 <Loader2 size={18} className="text-primary animate-spin" />
               </div>
               <div className="bg-surface border border-border px-5 py-3.5 rounded-2xl rounded-tl-none text-text-secondary text-sm shadow-soft">
-                AI is processing...
+                {t('chat.typing')}
               </div>
             </div>
           )}
@@ -532,7 +534,7 @@ export default function ChatInterface({ ws, isConnected }) {
               autoFocus
               rows={1}
               className="w-full bg-transparent pl-6 pr-16 py-4 text-[15px] text-text-primary placeholder-text-secondary/50 focus:outline-none resize-none overflow-hidden max-h-48"
-              placeholder={`Message ${activeSessionId}...`}
+              placeholder={t('chat.placeholder', { session: activeSessionId })}
               value={input}
               onChange={e => {
                 setInput(e.target.value);
@@ -550,7 +552,7 @@ export default function ChatInterface({ ws, isConnected }) {
             </button>
           </div>
           <p className="text-center text-[10px] text-text-secondary mt-4 uppercase tracking-tighter opacity-50">
-            Resonance v2.0 • Multi-Session AI Host • System Integrated
+            Resonance • Multi-Session AI Host Agent • System Integrated
           </p>
         </div>
       </div>

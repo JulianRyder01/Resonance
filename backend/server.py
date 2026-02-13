@@ -314,6 +314,35 @@ async def set_rag_config(update: RAGConfigUpdate):
     
     return {"status": "updated", "strategy": update.strategy}
 
+# preferences
+# 新增偏好设置模型
+class UserPreferencesUpdate(BaseModel):
+    language: str
+    theme: Optional[str] = "Dark Mode"
+    communication_style: Optional[str] = "Concise and professional"
+
+
+@app.get("/api/config/preferences")
+async def get_preferences():
+    """获取用户偏好设置"""
+    return state.agent.user_data.get('preferences', {"language": "中文", "theme": "Dark Mode"})
+
+@app.post("/api/config/preferences")
+async def update_preferences(prefs: UserPreferencesUpdate):
+    """更新用户偏好设置并持久化"""
+    if 'preferences' not in state.agent.user_data:
+        state.agent.user_data['preferences'] = {}
+    
+    state.agent.user_data['preferences'].update(prefs.dict())
+    
+    # 持久化到文件
+    import yaml
+    with open(state.agent.user_profile_path, 'w', encoding='utf-8') as f:
+        yaml.dump(state.agent.user_data, f, allow_unicode=True)
+    
+    # 刷新 Agent 内部状态
+    state.agent.load_all_configs()
+    return {"status": "success", "preferences": state.agent.user_data['preferences']}
 
 # --- [修复] SKILLS MANAGEMENT APIs ---
 

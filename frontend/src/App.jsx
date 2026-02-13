@@ -1,9 +1,10 @@
 // frontend/src/App.jsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next'; // [修改点]
 import { Toaster, toast } from 'sonner';
 import { 
   Terminal, Shield, Activity, Database, Settings, 
-  Zap, Wifi, WifiOff, Package // [新增] Package icon
+  Zap, Wifi, WifiOff, Package, Languages // [修改点] 增加语言图标
 } from 'lucide-react';
 
 import ChatInterface from './components/ChatInterface';
@@ -20,6 +21,7 @@ const RECONNECT_BASE_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
+  const { t, i18n } = useTranslation(); // [修改点]
   // [新增] 路由检测
   const [isHudMode, setIsHudMode] = useState(false);
 
@@ -34,7 +36,22 @@ function App() {
   const [activeTab, setActiveTab] = useState('chat');
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-
+  
+  // [修改点] 语言切换处理
+  const toggleLanguage = async () => {
+    const newLang = i18n.language === 'zh' ? 'en' : 'zh';
+    i18n.changeLanguage(newLang);
+    
+    // 同步到后端
+    try {
+      await axios.post("http://localhost:8000/api/config/preferences", {
+        language: newLang === 'zh' ? '中文' : 'English'
+      });
+      toast.success(newLang === 'zh' ? '已切换至中文' : 'Switched to English');
+    } catch (e) {
+      console.error("Failed to sync preference to backend");
+    }
+  };
   // 使用 Ref 避免闭包陷阱
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
@@ -188,11 +205,23 @@ function App() {
           </nav>
         </div>
 
-        <div className="mt-auto p-4 border-t border-border">
+        {/* [修改点] 底部增加语言切换器 */}
+        <div className="p-4 space-y-2">
+          <button 
+            onClick={toggleLanguage}
+            className="w-full flex items-center justify-between px-4 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 rounded-lg transition-colors border border-transparent hover:border-slate-200"
+          >
+            <div className="flex items-center gap-2">
+              <Languages size={14} />
+              {i18n.language === 'zh' ? '中文' : 'English'}
+            </div>
+            <span className="text-[10px] opacity-50">Switch</span>
+          </button>
+
           <div className={`p-3 rounded-lg border transition-all duration-300 ${isConnected ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'}`}>
             <div className="flex items-center justify-between mb-1">
-              <span className={`text-xs font-bold uppercase tracking-wide ${isConnected ? 'text-emerald-700' : 'text-red-700'}`}>
-                {isConnected ? 'System Online' : 'Disconnected'}
+              <span className={`text-[10px] font-bold uppercase tracking-wide ${isConnected ? 'text-emerald-700' : 'text-red-700'}`}>
+                {isConnected ? t('chat.online') : t('chat.offline')}
               </span>
               {isConnected ? <Wifi size={14} className="text-emerald-500" /> : <WifiOff size={14} className="text-red-500" />}
             </div>

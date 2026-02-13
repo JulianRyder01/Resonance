@@ -225,6 +225,54 @@ class RAGStore:
         print("[RAG Info]: Connection lost or not initialized. Retrying connection...")
         return self._initialize_db()
 
+    # --- [修改点 - 需求②] 新增相似度计算方法 ---
+    def calculate_similarity(self, text: str) -> float:
+        """
+        计算输入文本与库中现有记忆的最大相似度。
+        策略：70% Semantic Score + 30% BM25 Score (Normalized)
+        返回：0.0 ~ 1.0 的相似度得分
+        """
+        if not self._ensure_connection():
+            return 0.0
+        
+        count = self.collection.count()
+        if count == 0:
+            return 0.0
+
+        # 1. Semantic Search
+        try:
+            sem_results = self.collection.query(
+                query_texts=[text],
+                n_results=1, # 只需要最相似的那一个
+                include=['distances']
+            )
+            sem_dist = sem_results['distances'][0][0] if sem_results['distances'] else 100.0
+            # Convert Distance to Similarity (0~1)
+            # Chroma L2 distance can be > 1, so simple 1/(1+d) is safe
+            sem_score = 1.0 / (1.0 + sem_dist)
+        except Exception:
+            sem_score = 0.0
+
+        # 2. BM25 Search
+        bm25_score = 0.0
+        if self.bm25_index:
+            scores = self.bm25_index.search(text, top_k=1)
+            if scores:
+                raw_score = scores[0][1]
+                # BM25 score is unbound, need rough normalization. 
+                # Assuming simple scaling based on query length approx.
+                # Here we simplify: if raw_score > 10 it's very high.
+                # A better approach is MinMax scaling if we had batch scores, 
+                # but for single query check, we use a heuristic sigmoid or cap.
+                # Let's use a logistic function to squash 0~inf to 0~1
+                bm25_score = 1.0 / (1.0 + math.exp(-0.5 * (raw_score - 5))) 
+
+        # 3. Weighted Sum
+        final_score = (0.7 * sem_score) + (0.3 * bm25_score)
+        
+        # print(f"[RAG Dedup Check] Text: '{text[:20]}...' | Sem: {sem_score:.3f} | BM25: {bm25_score:.3f} | Final: {final_score:.3f}")
+        return final_score
+
     def add_memory(self, text, metadata=None):
         if not self._ensure_connection():
             return False

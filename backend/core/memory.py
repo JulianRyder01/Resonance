@@ -198,49 +198,27 @@ class ConversationMemory:
 
     def get_active_context(self) -> List[Dict]:
         """
-        [修改] 获取组合上下文：
-        1. Pinned Context: 前2条消息（通常是用户首条指令 + AI初步计划）。
-        2. Sliding Window: 最近 N 条消息。
-        这样即使对话很长，AI 也不会忘记最初的目标。
+        [修改说明 - 需求①] 
+        移除了强制保留前两条消息（Pinned Context）的逻辑。
+        现在采用纯滑动窗口机制。这允许用户在对话中途切换任务时，
+        旧的任务指令会被滑出窗口，AI 专注于当前最新的 User Input 和 Summary。
         """
         full_history = self._read_full_log()
         
         if not full_history:
             return []
 
-        # 清洗掉 system 消息（system 消息通常用于内部状态，Prompt 中会重新构建）
-        # 但如果是 Supervisor 注入的 System 指令，我们希望保留在最近的窗口里
-        # 这里暂时保留所有，由 HostAgent 的 Prompt 构建逻辑决定是否包含摘要
-        
+        # 过滤掉纯 System 消息，除非包含 Supervisor 指令（需要让 AI 看到）
+        # 注意：这里的 'system' role 指的是内部注入的日志，不是 Prompt 里的 System Prompt
         conversation_msgs = [m for m in full_history if m.get('role') != 'system' or 'Supervisor' in m.get('content', '')]
 
-        context_msgs = []
-        
-        # 1. [Pinned Context] 获取前 2 条 (User + AI Plan)
-        # 只有当总长度远大于窗口时才通过 Pinned 机制保护头部
-        if len(conversation_msgs) > self.window_size + 2:
-            pinned = conversation_msgs[:2]
-            context_msgs.extend(pinned)
-            
-            # 2. [Sliding Window] 获取最近的 window_size
-            recent = conversation_msgs[-self.window_size:]
-            
-            # 避免重叠
-            for msg in recent:
-                if msg not in context_msgs: # 简单的引用比较
-                    context_msgs.append(msg)
-        else:
-            # 消息很少，直接全部返回
-            context_msgs = conversation_msgs
+        # 简单的滑动窗口：获取最近的 window_size 条
+        context_msgs = conversation_msgs[-self.window_size:]
 
-        # 3. 回溯补全 (防止切断 Tool Chain)
-        # 注意：因为我们上面已经取了完整切片，这里的回溯主要针对 Sliding Window 边界
-        # 简单的做法：_sanitize_context 会处理孤儿 tool 消息，所以这里不做复杂回溯
-        
-        # 执行清洗
+        # 执行格式清洗（修复断裂的 Tool Chain）
         sanitized = self._sanitize_context(context_msgs)
 
-        # 字段过滤
+        # 字段过滤，只保留 LLM API 需要的字段
         clean_history = []
         allowed_keys = ["role", "content", "tool_calls", "tool_call_id", "name"]
         for msg in sanitized:
@@ -252,11 +230,13 @@ class ConversationMemory:
     def get_messages_for_summarization(self) -> str:
         """获取需要被摘要的旧消息（即在窗口之外的消息）"""
         full_history = self._read_full_log()
-        # 保留前2条（Pinned）和后 window_size 条，中间的用于摘要
-        if len(full_history) <= self.window_size + 2:
+        
+        # 需求①适配：因为不再 Pin 前2条，所以摘要应该覆盖所有被滑出的消息
+        if len(full_history) <= self.window_size:
             return ""
         
-        msgs_to_summarize = full_history[2:-self.window_size]
+        # 获取窗口之前的消息
+        msgs_to_summarize = full_history[:-self.window_size]
         if not msgs_to_summarize:
             return ""
 

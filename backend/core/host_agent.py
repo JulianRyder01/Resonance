@@ -341,21 +341,18 @@ Or, if user continue to chat with you, the limit will be reset too.
             # 调用 LLM 进行信息萃取 (Extraction)
             # 使用更便宜的模型或相同的模型，Prompt 侧重于"事实提取"
             extraction_prompt = f"""
-You are a Memory Extractor. Analyze the following interaction Turn (User input, AI thoughts, and Tool outputs).
-Your goal is to extract NEW, PERMANENT facts about the user, their projects, or technical solutions found.
+            You are a Memory Extractor. Analyze the following interaction Turn.
+            Your goal is to extract NEW, PERMANENT facts about the user, their projects, or technical solutions found.
 
-[Interaction Turn Log]:
-{turn_events_log}
+            [Interaction Turn Log]:
+            {turn_events_log}
 
-[Instructions]:
-1. Focus on: Project paths, User preferences, recurring technical issues/solutions, specific facts.
-2. Ignore: Transient states (e.g., current CPU usage), casual greetings, or "OK" messages.
-3. If no permanent fact is found, output "NO_INFO".
-4. If facts are found, output them as concise, independent statements.
-5. Example Output: "The user's project 'Resonance' is located at D:\\Develop\\Resonance."
-
-[Output]:
-"""
+            [Instructions]:
+            1. Focus on: Project paths, User preferences, recurring technical issues/solutions, specific facts.
+            2. Ignore: Transient states (e.g., current CPU usage), casual greetings, or "OK" messages.
+            3. If no permanent fact is found, output "NO_INFO".
+            4. If facts are found, output them as concise, independent statements.
+            """
             response = self.client.chat.completions.create(
                 model=self.current_model_config['model'],
                 messages=[{"role": "user", "content": extraction_prompt}],
@@ -367,21 +364,12 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             
             # 3. 存储逻辑
             if extracted_info and "NO_INFO" not in extracted_info:
-                # [关键修改] 去重检查 (Dedup Check)
-                # 先用提取出的事实去 RAG 里搜一下
-                existing_docs = self.rag_store.search_memory(extracted_info, n_results=1, strategy="semantic")
+                # [关键修改] 使用 calculate_similarity 进行高精度去重
+                similarity = self.rag_store.calculate_similarity(extracted_info)
                 
-                # 这里做一个简单的文本包含或相似度判断 (这里简化为如果有结果且内容非常接近)
-                # 实际生产中可以计算 embedding cosine similarity > 0.9
-                is_duplicate = False
-                if existing_docs:
-                    top_doc = existing_docs[0]
-                    # 简单的字符串包含检查，防止完全重复
-                    if extracted_info in top_doc or top_doc in extracted_info:
-                        is_duplicate = True
-                        print(f"[Memory]: Skip duplicate fact: {extracted_info[:30]}...")
-
-                if not is_duplicate:
+                if similarity > 0.95:
+                    print(f"[Memory System]: ⏭️ Skipped duplicate memory (Similarity: {similarity:.4f}): {extracted_info[:40]}...")
+                else:
                     success = self.rag_store.add_memory(
                         text=extracted_info,
                         metadata={

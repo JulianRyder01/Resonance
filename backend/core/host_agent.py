@@ -428,7 +428,8 @@ Or, if user continue to chat with you, the limit will be reset too.
         """
         督战员检查：分析当前上下文，判断任务是否真正完成。
         """
-        print("[Supervisor]: Checking mission status...")
+        if self.debug_mode:
+            print("[Supervisor]: Checking mission status...")
         
         # 获取最近的上下文（包含 Plan 和 Execution）
         context = session_memory.get_active_context()[-5:] 
@@ -731,11 +732,7 @@ Response (JSON Only):
                     keyword=args.get("keyword"),
                     stop_event=stop_event
                 )
-            elif function_name == "read_file_content":
-                return self.toolbox.read_file_content(args.get("file_path"))
-            elif function_name == "remember_user_fact":
-                return self.toolbox.remember_user_fact(args.get("key"), args.get("value"))
-            
+
             elif function_name == "browse_url":
                 return self.toolbox.run_browse_url(args.get("url"))
 

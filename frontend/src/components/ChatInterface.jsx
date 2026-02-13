@@ -14,23 +14,27 @@ const API_BASE = "http://localhost:8000/api";
 // [新增] 可折叠的 Tool Message 组件
 const ToolMessage = ({ name, content }) => {
     const [expanded, setExpanded] = useState(false);
-    // 预览内容：如果是 JSON，尝试格式化，否则截取前100字
-    const preview = content.length > 100 ? content.slice(0, 100) + "..." : content;
+    // 确保 content 是字符串以便处理
+    const safeContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    const preview = safeContent.length > 100 ? safeContent.slice(0, 100) + "..." : safeContent;
+    
+    // [修复点] 确保工具名不为空时有显示，为空时显示 Unknown Tool
+    const displayName = name || "system_call";
     
     return (
-        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden text-xs w-full max-w-full">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden text-xs w-full max-w-full my-1">
             <button 
                 onClick={() => setExpanded(!expanded)}
                 className="w-full flex items-center gap-2 px-3 py-2 bg-slate-950 hover:bg-slate-900 transition-colors text-blue-400 font-mono uppercase tracking-wider text-[10px]"
             >
                 {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <Play size={10} /> 
-                Tool: {name}
-                {!expanded && <span className="text-slate-500 normal-case tracking-normal ml-auto truncate max-w-[200px]">{preview}</span>}
+                TOOL: {displayName}
+                {!expanded && <span className="text-slate-500 normal-case tracking-normal ml-auto truncate max-w-[500px]">{preview}</span>}
             </button>
             {expanded && (
                 <div className="p-3 border-t border-slate-800 bg-slate-900 overflow-x-auto">
-                    <pre className="font-mono text-slate-300 whitespace-pre-wrap break-all">{content}</pre>
+                    <pre className="font-mono text-slate-300 whitespace-pre-wrap break-all">{safeContent}</pre>
                 </div>
             )}
         </div>
@@ -285,7 +289,11 @@ export default function ChatInterface({ ws, isConnected }) {
   const sendMessage = () => {
   if (!input.trim() || !isConnected) return;
     const tempId = Date.now().toString();
-    const msg = input;
+    const msg = input.trim();
+    
+    // [修复点] 之前这里的 messageText 变量未定义，导致报错 ReferenceError
+    // 这是“需求 ①”报错的主因
+    try {
     if (msg !== "/stop") {
         setMessages(prev => [...prev, { role: 'user', content: msg, id: tempId }]);
         // 发送消息时重置滚动锁定
@@ -293,15 +301,16 @@ export default function ChatInterface({ ws, isConnected }) {
         setTimeout(scrollToBottom, 50);
   }
 
-  try {
     ws.send(JSON.stringify({ 
-      message: messageText,
+      message: msg, // 已修正：从 messageText 改为 msg
       session_id: activeSessionId,
       id: tempId // 发送 ID 给后端
     }));
     setInput("");
   } catch (err) {
-    toast.error(err);
+        // [修复点] 如果报错，将其转为字符串再提示，防止渲染对象报错
+        console.error("Send failed:", err);
+        toast.error("Send failed", { description: String(err.message || err) });
   }
   };
 
@@ -321,6 +330,7 @@ export default function ChatInterface({ ws, isConnected }) {
     try {
       await axios.delete(`${API_BASE}/sessions/${activeSessionId}/messages`);
       setMessages([]);
+      setCurrentPlan("");
     } catch(e) {
       toast.error("Failed to clear");
     }
@@ -331,6 +341,24 @@ export default function ChatInterface({ ws, isConnected }) {
       e.preventDefault();
       sendMessage();
     }
+  };
+
+  // [修复点] 确保渲染内容始终为有效节点
+  const renderMessageContent = (m) => {
+    if (m.role === 'tool') {
+        return <ToolMessage name={m.name} content={m.content} />;
+    }
+    
+    // 强制转换为字符串，防止“Objects are not valid as a React child”
+    const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    
+    return (
+        <div className="prose prose-sm max-w-none prose-slate">
+            <ReactMarkdown>
+                {text.replace(/<plan>[\s\S]*?<\/plan>/g, '*[Plan updated in Monitor]*') || ""}
+            </ReactMarkdown>
+        </div>
+    );
   };
 
   return (
@@ -479,16 +507,7 @@ export default function ChatInterface({ ws, isConnected }) {
                       ? 'bg-amber-50 border border-amber-200 text-amber-800 w-full italic'
                       : 'bg-surface border border-border text-text-primary rounded-tl-none'
                 }`}>
-                {m.role === 'tool' ? (
-                  <ToolMessage name={m.name} content={m.content} />
-                ) : (
-                    <div className="prose prose-sm max-w-none prose-slate">
-                        {/* 隐藏消息体中的 <plan> 标签，避免重复显示 */}
-                    <ReactMarkdown>
-                            {m.content?.replace(/<plan>[\s\S]*?<\/plan>/g, '*[Plan updated in Monitor]*') || ""}
-                  </ReactMarkdown>
-                  </div>
-                )}
+                {renderMessageContent(m)}
               </div>
             </div>
           ))}

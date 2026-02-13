@@ -16,3 +16,4 @@ schedule
 keyboard
 fastapi==0.128.3
 onnxruntime==1.24.1
+pywebview>=5.0

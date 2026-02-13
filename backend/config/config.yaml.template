@@ -10,6 +10,7 @@ scripts:
 
 system:
   log_dir: ./logs
+  debug: false  # debug 开关，设为true以显示更详细的日志到命令行，包括提示词等。
   name: Resonance
   user_profile_path: config/user_profile.yaml
   # 技能存放路径。支持Anthropic的 SKILLS ，默认为运行目录下的 SKILLS

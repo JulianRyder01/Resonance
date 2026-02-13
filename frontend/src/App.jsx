@@ -11,7 +11,8 @@ import SentinelDashboard from './components/SentinelDashboard';
 import SystemMonitor from './components/SystemMonitor';
 import MemoryManager from './components/MemoryManager';
 import ModelConfig from './components/ModelConfig';
-import SkillStore from './components/SkillStore'; // [新增]
+import SkillStore from './components/SkillStore';
+import HUD from './components/HUD'; // [新增] 引入 HUD 组件
 
 const WS_URL = "ws://localhost:8000/ws/chat";
 const HEARTBEAT_INTERVAL = 30000; // 30秒一次心跳
@@ -19,6 +20,17 @@ const RECONNECT_BASE_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
+  // [新增] 路由检测
+  const [isHudMode, setIsHudMode] = useState(false);
+
+  useEffect(() => {
+    if (window.location.pathname === '/hud') {
+      setIsHudMode(true);
+      document.body.style.background = 'transparent'; // HUD 模式背景透明 (需要 pywebview 支持)
+    }
+  }, []);
+
+  // ... (状态定义和 WebSocket 逻辑保持不变) ...
   const [activeTab, setActiveTab] = useState('chat');
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -44,9 +56,7 @@ function App() {
         setIsConnected(true);
       reconnectAttempts.current = 0; // 重置重连次数
       setWs(socket);
-      toast.success("Resonance Core Connected");
-      
-      // 启动心跳检测
+      if (!isHudMode) toast.success("Resonance Core Connected"); // HUD 模式减少干扰
       startHeartbeat();
       };
       
@@ -128,7 +138,7 @@ function App() {
       stopHeartbeat();
     };
   }, [connect]);
-
+  
   // 手动轮询检查 (作为双重保险)
   useEffect(() => {
     const healthCheck = setInterval(() => {
@@ -140,6 +150,9 @@ function App() {
     return () => clearInterval(healthCheck);
   }, [isConnected, connect]);
 
+  if (isHudMode) {
+    return <HUD ws={ws} isConnected={isConnected} />;
+  }
 
   return (
     <div className="flex h-screen w-screen bg-background text-text-primary overflow-hidden font-sans selection:bg-primary/20">
@@ -200,7 +213,7 @@ function App() {
         
         <div className="flex-1 z-10 overflow-hidden relative">
         {activeTab === 'chat' && <ChatInterface ws={ws} isConnected={isConnected} />}
-          {activeTab === 'skills' && <SkillStore />} {/* [新增] */}
+          {activeTab === 'skills' && <SkillStore />}
         {activeTab === 'sentinel' && <SentinelDashboard />}
         {activeTab === 'monitor' && <SystemMonitor />}
           {activeTab === 'memory' && <MemoryManager />}

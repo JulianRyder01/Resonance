@@ -15,8 +15,6 @@ from core.rag_store import RAGStore
 from core.sentinel_engine import SentinelEngine
 from core.skill_manager import SkillManager  # [新增]
 
-DEBUG = True
-
 class HostAgent:
     def __init__(self, default_session="resonance_main", config_path="config/config.yaml"):
         # [修改点] 默认会话ID
@@ -40,8 +38,9 @@ class HostAgent:
         # 加载所有配置
         self.load_all_configs()
 
-        # [关键修改] 强制计算 Vector Store 的绝对路径
-        # 无论 config 写的是什么相对路径，我们都将其解析为基于 backend 的绝对路径
+        # [修改点] 从配置读取 debug 状态
+        self.debug_mode = self.config.get('system', {}).get('debug', False)
+
         raw_vec_path = self.config.get('system', {}).get('memory', {}).get('vector_store_path', './logs/vector_store')
         if not os.path.isabs(raw_vec_path):
             # 如果是相对路径，拼接到 backend_root 下
@@ -102,6 +101,9 @@ class HostAgent:
             print(f"[Critical Warning] Config not found at {self.config_path}")
             self.config = {}
             
+        # [修改点] 刷新 debug 状态
+        self.debug_mode = self.config.get('system', {}).get('debug', False)
+
         # 2. 加载模型 Profiles
         if os.path.exists(self.profiles_path):
             with open(self.profiles_path, 'r', encoding='utf-8') as f:
@@ -273,7 +275,8 @@ Or, if user continue to chat with you, the limit will be reset too.
         # 组合 Prompt
         full_prompt = base_identity + plan_injection + user_section + skill_section + rag_section + summary_section
 
-        if DEBUG:
+        # [修改点] 使用 debug_mode 属性判断是否打印
+        if self.debug_mode:
             print(f"[DEBUG] Full Prompt:{full_prompt}")
         return full_prompt
 
@@ -319,7 +322,9 @@ Or, if user continue to chat with you, the limit will be reset too.
                 new_summary = response.choices[0].message.content
                 self.memory.save_summary(new_summary)
                 print(f"[System]: Memory summarized. Length: {len(new_summary)}")
-                if DEBUG:
+                
+                # [修改点] Debug
+                if self.debug_mode:
                     print(f"[DEBUG]: [System]: Memory preview: {new_summary}")
             except Exception as e:
                 print(f"[Warning] Failed to generate summary: {e}")
@@ -491,7 +496,7 @@ Response (JSON Only):
             relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k, strategy=rag_strategy)
             
             # 督战循环限制
-            MAX_SUPERVISOR_LOOPS = 4
+            MAX_SUPERVISOR_LOOPS = 10
             supervisor_loops = 0
             
             while supervisor_loops <= MAX_SUPERVISOR_LOOPS:

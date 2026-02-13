@@ -4,12 +4,38 @@ import ReactMarkdown from 'react-markdown';
 import axios from 'axios';
 import { 
   Send, Bot, User, Command, Eraser, Play, Loader2, StopCircle, 
-  MessageSquare, Plus, Trash2, Edit2, Check, X
+  MessageSquare, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronRight
 } from 'lucide-react';
 import { toast } from 'sonner';
 import TaskMonitor from './TaskMonitor'; // [新增]
 
 const API_BASE = "http://localhost:8000/api";
+
+// [新增] 可折叠的 Tool Message 组件
+const ToolMessage = ({ name, content }) => {
+    const [expanded, setExpanded] = useState(false);
+    // 预览内容：如果是 JSON，尝试格式化，否则截取前100字
+    const preview = content.length > 100 ? content.slice(0, 100) + "..." : content;
+    
+    return (
+        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden text-xs w-full max-w-full">
+            <button 
+                onClick={() => setExpanded(!expanded)}
+                className="w-full flex items-center gap-2 px-3 py-2 bg-slate-950 hover:bg-slate-900 transition-colors text-blue-400 font-mono uppercase tracking-wider text-[10px]"
+            >
+                {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <Play size={10} /> 
+                Tool: {name}
+                {!expanded && <span className="text-slate-500 normal-case tracking-normal ml-auto truncate max-w-[200px]">{preview}</span>}
+            </button>
+            {expanded && (
+                <div className="p-3 border-t border-slate-800 bg-slate-900 overflow-x-auto">
+                    <pre className="font-mono text-slate-300 whitespace-pre-wrap break-all">{content}</pre>
+                </div>
+            )}
+        </div>
+    );
+};
 
 export default function ChatInterface({ ws, isConnected }) {
   // 会话状态
@@ -28,6 +54,10 @@ export default function ChatInterface({ ws, isConnected }) {
   const [currentPlan, setCurrentPlan] = useState("");
   
   const scrollRef = useRef(null);
+  // [新增] 滚动容器引用
+  const containerRef = useRef(null);
+  // [新增] 标记用户是否在查看历史
+  const isUserScrollingRef = useRef(false);
 
   // --- [新增] URL Deep Link 支持 ---
   useEffect(() => {
@@ -123,6 +153,7 @@ export default function ChatInterface({ ws, isConnected }) {
       } else {
         setCurrentPlan("");
       }
+      setTimeout(scrollToBottom, 100);
     } catch (err) {
       console.error("History load error", err);
     }
@@ -191,6 +222,7 @@ export default function ChatInterface({ ws, isConnected }) {
             }];
           });
           setIsTyping(true);
+          scrollToBottom(); // 如果是用户发的信息，强制滚动到底
         }
         else if (data.type === 'done') {
           setMessages(prev => prev.map(m => ({ ...m, complete: true })));
@@ -228,27 +260,37 @@ export default function ChatInterface({ ws, isConnected }) {
     return () => ws.removeEventListener('message', handleMsg);
   }, [ws, activeSessionId]); // 依赖 activeSessionId 确保消息路由正确
 
-  // 自动滚动
-  useEffect(() => {
+  // [修改点] 智能滚动逻辑
+  const scrollToBottom = () => {
     if (scrollRef.current) {
       scrollRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  };
+
+  useEffect(() => {
+    // 只有当用户没有向上滚动查看历史时，才自动滚动
+    if (!isUserScrollingRef.current) {
+        scrollToBottom();
+    }
   }, [messages, isTyping]);
+
+  // 监听滚动事件，判断用户是否在查看历史
+  const handleScroll = (e) => {
+      const { scrollTop, scrollHeight, clientHeight } = e.target;
+      // 如果距离底部超过 100px，认为用户在查看历史
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      isUserScrollingRef.current = !isNearBottom;
+  };
 
   const sendMessage = () => {
   if (!input.trim() || !isConnected) return;
-  
-  const tempId = Date.now().toString(); // 生成临时 ID
-  const messageText = input;
-
-  // 1. 本地立即显示 (但逻辑上标记为待确认)
-  // 如果是 /stop 指令，我们不把它存入对话气泡，保持界面整洁
-  if (messageText !== "/stop") {
-    setMessages(prev => [...prev, { 
-      role: 'user', 
-      content: messageText, 
-      id: tempId // 存入 ID
-    }]);
+    const tempId = Date.now().toString();
+    const msg = input;
+    if (msg !== "/stop") {
+        setMessages(prev => [...prev, { role: 'user', content: msg, id: tempId }]);
+        // 发送消息时重置滚动锁定
+        isUserScrollingRef.current = false;
+        setTimeout(scrollToBottom, 50);
   }
 
   try {
@@ -401,8 +443,12 @@ export default function ChatInterface({ ws, isConnected }) {
           </div>
         </div>
 
-        {/* 消息滚动区 */}
-        <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6">
+        {/* [修改点] 消息滚动区 + onScroll 事件 */}
+        <div 
+            ref={containerRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6"
+        >
           {messages.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-text-secondary/40 space-y-6 opacity-60">
               <div className="w-24 h-24 bg-surface rounded-3xl shadow-soft flex items-center justify-center border border-border">
@@ -434,12 +480,7 @@ export default function ChatInterface({ ws, isConnected }) {
                       : 'bg-surface border border-border text-text-primary rounded-tl-none'
                 }`}>
                 {m.role === 'tool' ? (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest border-b border-white/10 pb-1">
-                      <Play size={10} /> Tool Execution: {m.name}
-                    </div>
-                    <div className="overflow-x-auto whitespace-pre-wrap break-all opacity-90">{m.content}</div>
-                  </div>
+                  <ToolMessage name={m.name} content={m.content} />
                 ) : (
                     <div className="prose prose-sm max-w-none prose-slate">
                         {/* 隐藏消息体中的 <plan> 标签，避免重复显示 */}

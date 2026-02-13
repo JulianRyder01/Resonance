@@ -7,6 +7,7 @@ import {
   MessageSquare, Plus, Trash2, Edit2, Check, X
 } from 'lucide-react';
 import { toast } from 'sonner';
+import TaskMonitor from './TaskMonitor'; // [新增]
 
 const API_BASE = "http://localhost:8000/api";
 
@@ -22,6 +23,9 @@ export default function ChatInterface({ ws, isConnected }) {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
+  
+  // [新增] 任务监控状态
+  const [currentPlan, setCurrentPlan] = useState("");
   
   const scrollRef = useRef(null);
 
@@ -112,8 +116,23 @@ export default function ChatInterface({ ws, isConnected }) {
     try {
       const res = await axios.get(`${API_BASE}/history?session_id=${sid}`);
       setMessages(res.data);
+      // [新增] 从历史记录中恢复 Plan
+      const lastPlanMsg = [...res.data].reverse().find(m => m.role === 'assistant' && m.content.includes('<plan>'));
+      if (lastPlanMsg) {
+        extractPlan(lastPlanMsg.content);
+      } else {
+        setCurrentPlan("");
+      }
     } catch (err) {
       console.error("History load error", err);
+    }
+  };
+
+  // [新增] 提取 Plan 的逻辑
+  const extractPlan = (text) => {
+    const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
+    if (planMatch) {
+      setCurrentPlan(planMatch[1]);
     }
   };
 
@@ -146,10 +165,13 @@ export default function ChatInterface({ ws, isConnected }) {
             const last = prev[prev.length - 1];
             if (last?.role === 'assistant' && !last.complete) {
               const updatedMessages = [...prev];
+              const newContent = (last.content || "") + deltaContent;
               updatedMessages[updatedMessages.length - 1] = {
                 ...last,
-                content: (last.content || "") + deltaContent
+                content: newContent
               };
+              // [新增] 实时解析 Plan
+              extractPlan(newContent);
               return updatedMessages;
             }
             return [...prev, { role: 'assistant', content: deltaContent, complete: false }];
@@ -186,7 +208,10 @@ export default function ChatInterface({ ws, isConnected }) {
         else if (data.type === 'status') {
             // 处理后端发来的状态信息，例如 Stop 确认
             if (data.content.includes("Aborted") || data.content.includes("Stop")) {
-                setIsTyping(false); // 强制停止加载状态
+                 setIsTyping(false);
+                 setMessages(prev => [...prev, { role: 'system', content: data.content }]);
+             } else if (data.content.includes("Supervisor")) {
+                 // [新增] 显示督战信息
                 setMessages(prev => [...prev, { role: 'system', content: data.content }]);
             }
         } 
@@ -269,7 +294,10 @@ export default function ChatInterface({ ws, isConnected }) {
   return (
     <div className="flex h-full overflow-hidden bg-background">
       
-      {/* --- 左侧会话列表 --- */}
+      {/* [新增] 悬浮任务监控器 */}
+      {currentPlan && <TaskMonitor planRaw={currentPlan} onClose={() => setCurrentPlan("")} />}
+
+      {/* 左侧列表 (Keep Existing) */}
       <div className="w-64 border-r border-border bg-surface/50 flex flex-col shrink-0">
         <div className="p-4 border-b border-border">
           <button 
@@ -413,9 +441,10 @@ export default function ChatInterface({ ws, isConnected }) {
                     <div className="overflow-x-auto whitespace-pre-wrap break-all opacity-90">{m.content}</div>
                   </div>
                 ) : (
-                  <div className="prose prose-sm max-w-none prose-slate prose-headings:text-primary prose-a:text-blue-600 prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded prose-pre:bg-slate-900 prose-pre:text-slate-100">
+                    <div className="prose prose-sm max-w-none prose-slate">
+                        {/* 隐藏消息体中的 <plan> 标签，避免重复显示 */}
                     <ReactMarkdown>
-                    {m.content || ""}
+                            {m.content?.replace(/<plan>[\s\S]*?<\/plan>/g, '*[Plan updated in Monitor]*') || ""}
                   </ReactMarkdown>
                   </div>
                 )}

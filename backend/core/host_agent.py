@@ -4,8 +4,9 @@ import json
 import os
 import time
 import threading
-import traceback  # [修改] 引入 traceback 以便更好地处理错误
-from openai import OpenAI, APIConnectionError, APITimeoutError
+import traceback
+import re
+from openai import OpenAI
 from core.memory import ConversationMemory
 # [修改点] 导入解耦后的工具箱
 from core.functools.tools import Toolbox
@@ -177,20 +178,28 @@ class HostAgent:
         """
         # 1. 基础身份设定
         base_identity = """
-1. **PLAN FIRST.** For any task requiring more than one step (e.g., "compare papers", "build project"), you MUST output a `<plan>` block before taking any action.
-   Example:
-   <plan>
-   1. Search for papers about X.
-   2. Download the top 3 PDFs.
-   3. Read abstract of each.
-   4. Synthesize comparison.
-   </plan>
-   
-2. **Context Anchoring.** ALWAYS keep the user's *original intent* in mind. Do not let retrieved memories (which might be about old topics) distract you from the current specific request.
+You are Resonance, an advanced Windows AI Host.
 
-3. **Explore then Act.** When asked to find information in files, DO NOT guess. Use 'list_directory_files' or 'search_files_by_keyword' first.
+### CORE OPERATING PROTOCOLS (MUST FOLLOW):
 
-4. **Robustness.** If a command fails, analyze the error and try a different approach.
+1.  **PLAN FIRST (MANDATORY)**: 
+    For ANY task that is not a simple greeting, you MUST start your response with a structured plan block using the `<plan>` XML tag.
+    
+    Format:
+    <plan>
+    - [ ] Step 1: Description
+    - [ ] Step 2: Description (Deliverable: filename.ext)
+    </plan>
+
+    *Update this plan in subsequent turns by marking items as [x].*
+
+2.  **DELIVERABLE AWARENESS**: 
+    Know exactly what files or results you need to produce. Do not stop until the final deliverable is created and verified.
+
+3.  **TOOL USAGE**:
+    - Use `list_directory_files` before reading/writing to understand the path.
+    - Use `read_file_content` to check content before editing.
+    - If a tool fails, analyze the error and try a different approach.
 
 5. **Active Memory.** You have access to a long-term Vector Memory. 
    - You can query it using `search_long_term_memory` if the context is missing.
@@ -209,17 +218,17 @@ Or, if user continue to chat with you, the limit will be reset too.
         # 2. 锚定原始请求
         anchor_section = ""
         if original_query:
-            anchor_section = f"\n[CRITICAL ANCHOR]\nOriginal User Intent: \"{original_query}\"\n(Align all actions to fulfill this specific request. Ignore retrieved memories if they conflict with this intent.)\n"
+            anchor_section = f"\n### CURRENT MISSION ANCHOR\nUser's Original Request: \"{original_query}\"\n(Align all actions to complete this specific request. Do not get distracted.)\n"
 
         # 3. 注入用户画像
-        user_section = "\n[User Profile & Preferences]\n"
+        user_section = "\n### USER PROFILE\n"
         user_info = self.user_data.get('user_info', {})
         known_projects = self.user_data.get('known_projects', {})
         
         for k, v in user_info.items():
             user_section += f"- {k}: {v}\n"
         if known_projects:
-            user_section += "- Known Projects/Paths:\n"
+            user_section += "- Known Projects:\n"
         for proj, path in known_projects.items():
             user_section += f"  * {proj}: {path}\n"
 
@@ -229,21 +238,16 @@ Or, if user continue to chat with you, the limit will be reset too.
             # 只有当 Skill 激活时，才加载 SOP (减少 Token，防止污染)
             sop_text, _ = self.skill_manager.load_skill_context(self.active_skill)
             if sop_text:
-                skill_section = f"\n\n[🔥 ACTIVE SKILL CONTEXT: {self.active_skill}]\n"
-                skill_section += "!!! CRITICAL: You are now executing a specialized skill. !!!\n"
-                skill_section += "================ SKILL SOP START ================\n"
-                skill_section += sop_text
-                skill_section += "\n================ SKILL SOP END ==================\n"
-                skill_section += "INSTRUCTION: Perform the task using the specific tools provided above. Validate results as per SOP.\n"
+                skill_section = f"\n\n### 🔥 ACTIVE SKILL: {self.active_skill}\n{sop_text}\nFOLLOW THIS SOP RIGIDLY.\n"
         else:
             # 未激活时，提示可用技能索引 (Discovery Phase)
             skill_index = self.skill_manager.get_skill_index()
-            skill_section = f"\n[Available Skills Index]\n(Use 'manage_skills' to activate one if needed)\n{skill_index}\n"
+            skill_section = f"\n### AVAILABLE SKILLS\n{skill_index}\n(Use 'manage_skills' to activate one if needed)\n"
 
         # 4. 长期记忆注入 (RAG Results)
         rag_section = ""
         if relevant_memories:
-            rag_section = "\n[Relevant Long-term Memories (Reference Only)]\n"
+            rag_section = "\n### Long-term Memories (Reference Only)\n"
             for mem in relevant_memories:
                 rag_section += f"- {mem}\n"
             rag_section += "(Use these ONLY if they help the *Current* Original Intent.)\n"
@@ -252,7 +256,7 @@ Or, if user continue to chat with you, the limit will be reset too.
         summary_text = memory_instance.load_summary()
         summary_section = ""
         if summary_text:
-            summary_section = f"\n[Previous Conversation Summary]\n{summary_text}\n(This is what happened before the current chat window)\n"
+            summary_section = f"\n### PREVIOUS CONVERSATION SUMMARY\n{summary_text}\n"
 
         # 组合 Prompt
         full_prompt = base_identity + anchor_section + user_section + skill_section + rag_section + summary_section
@@ -397,59 +401,55 @@ Your goal is to extract NEW, PERMANENT facts about the user, their projects, or 
             print(f"[Core Error] Failed to inject sentinel memory: {e}")
 
     # =========================================================================
-    # [重构] 智能重试与自动继续的核心逻辑
+    # [核心新增] Supervisor (督战) 机制
     # =========================================================================
-    
-    def _autonomous_reflection(self, user_input, session_memory):
+    def _supervisor_check(self, session_memory: ConversationMemory, user_input: str) -> dict:
         """
-        [新增] 模型反思环节
-        当工具调用次数达到上限时，模型思考是否需要继续。
+        督战员检查：分析当前上下文，判断任务是否真正完成。
         """
-        print("[System]: Triggering Autonomous Reflection...")
+        print("[Supervisor]: Checking mission status...")
         
-        reflection_prompt = f"""
-[SYSTEM AUTONOMOUS CHECK]
-You have reached the maximum tool execution limit for the current batch.
+        # 获取最近的上下文（包含 Plan 和 Execution）
+        context = session_memory.get_active_context()[-5:] 
+        context_str = json.dumps(context, ensure_ascii=False)
+        
+        supervisor_prompt = f"""
+[SUPERVISOR PROTOCOL]
+You are the Overwatch System. Your job is to verify if the AI has completed the user's request based on the plan.
 
-User's Original Request: "{user_input}"
+Original Request: "{user_input}"
+Recent History: {context_str}
 
-Review your progress based on the conversation history above.
-1. Have you substantially completed the request?
-2. Is there a critical next step required to finish?
+Checklist:
+1. Did the AI output a `<plan>`?
+2. Are all items in the plan marked as completed (e.g., [x])?
+3. Were the deliverables actually generated/modified?
 
-Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
-{{
-  "status": "CONTINUE" or "FINISH",
-  "reasoning": "Short explanation of your status."
-}}
+If the task is incomplete or the AI is stopping prematurely, output:
+{{"status": "INCOMPLETE", "instruction": "Briefly state what must be done next."}}
+
+If the task is truly done or waiting for user input, output:
+{{"status": "COMPLETE", "instruction": "None"}}
+
+Response (JSON Only):
 """
         try:
-            # 获取当前上下文
-            context = session_memory.get_active_context()
-            # 临时追加反思提示
-            messages = context + [{"role": "system", "content": reflection_prompt}]
-            
             response = self.client.chat.completions.create(
                 model=self.current_model_config['model'],
-                messages=messages,
+                messages=[{"role": "user", "content": supervisor_prompt}],
                 temperature=0.1,
-                response_format={"type": "json_object"} # 如果模型支持JSON模式
+                response_format={"type": "json_object"}
             )
-            
-            content = response.choices[0].message.content
-            decision_data = json.loads(content)
-            
-            return decision_data
+            decision = json.loads(response.choices[0].message.content)
+            print(f"[Supervisor]: Decision -> {decision}")
+            return decision
         except Exception as e:
-            print(f"[Reflection Error]: {e}")
-            # 默认保守策略：结束
-            return {"status": "FINISH", "reasoning": "Error during reflection, stopping safely."}
+            print(f"[Supervisor Error]: {e}")
+            return {"status": "COMPLETE"} # 出错时保守处理，不陷入死循环
 
     def chat(self, user_input, session_id="default"):
         """
-        主交互逻辑 (Generator) - 线程安全版本
-        [修改] 增加了自动继续 (Auto-Continue) 和智能重试机制
-        Yields: dict -> {"type": "status"|"delta"|"tool", "content": ...}
+        主交互逻辑 (支持督战循环)
         """
         # [并发安全] 初始化该会话的中断事件
         if session_id not in self.interrupt_events:
@@ -460,9 +460,6 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
         # [并发安全] 获取会话专属内存
         session_memory = self.get_memory(session_id)
         
-        # -------------------------------------------------------------
-        # 检查 Client 是否已初始化
-        # -------------------------------------------------------------
         if self.client is None:
             yield {"type": "error", "content": "LLM Client is not initialized. Check profiles.yaml."}
             return
@@ -475,61 +472,38 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
             top_k = self.config.get('system', {}).get('memory', {}).get('retrieve_top_k', 3)
             # [修改] 读取配置的策略，默认为 semantic
             rag_strategy = self.config.get('system', {}).get('memory', {}).get('rag_strategy', 'semantic')
+            relevant_docs = self.rag_store.search_memory(user_input, n_results=top_k, strategy=rag_strategy)
             
-            relevant_docs = self.rag_store.search_memory(
-                user_input, 
-                n_results=top_k, 
-                strategy=rag_strategy  # <--- 传入参数
-            )
+            # 督战循环限制
+            MAX_SUPERVISOR_LOOPS = 3
+            supervisor_loops = 0
             
-            # [关键修改] 传递 user_input 作为 original_query
-            dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory, original_query=user_input)
-            
-            # messages 列表将作为我们在这一轮推理中的“工作区”
-            messages = [{"role": "system", "content": dynamic_sys_prompt}]
-            messages += session_memory.get_active_context() 
-            messages.append({"role": "user", "content": user_input})
-            
-            # 2. 准备工具
-            tools = self.toolbox.get_tool_definitions()
-
-            
-            # 4. 进入 ReAct 循环
-            # 用于萃取的全量日志记录（本轮对话）
-            turn_log_for_extraction = f"User Input: {user_input}\n"
-            
-            # [新增] 限制常量
-            MAX_TOOL_ITERATIONS = 32  # 单次 Batch 最大工具调用次数
-            MAX_CONTINUATIONS = 3     # 允许自动继续的最大轮次
-            
-            continuation_count = 0
-            
-            # [修改] 外层循环：控制 "Continue/Retry" 的生命周期
-            while continuation_count <= MAX_CONTINUATIONS:
+            while supervisor_loops <= MAX_SUPERVISOR_LOOPS:
+                # 1. 构建 Prompt (Pinned Context 逻辑在 memory.get_active_context 中处理)
+                dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory, original_query=user_input)
+                messages = [{"role": "system", "content": dynamic_sys_prompt}] + session_memory.get_active_context()
                 
-                # 内层循环计数器
+                # 2. ReAct 循环 (Action Loop)
+                MAX_TOOL_ITERATIONS = 15
                 current_iteration = 0
+                turn_log_for_extraction = f"User Input: {user_input}\n"
                 
-                # [修改] 内层 ReAct 循环
+                # 标记本次生成是否真正结束（没有工具调用）
+                is_generation_finished = False
+
                 while current_iteration < MAX_TOOL_ITERATIONS:
                     # 循环开始前检查打断
                     if stop_event.is_set():
-                        yield {"type": "status", "content": "⛔ Task Interrupted by User."}
-                        return # 直接结束 generator
+                        yield {"type": "status", "content": "⛔ Task Interrupted."}
+                        return
 
                     current_iteration += 1
                     
-                    # 每次循环都更新 Prompt (因为 active_skill 可能在工具调用中改变)
-                    dynamic_sys_prompt = self._build_dynamic_system_prompt(relevant_docs, session_memory)
-                    messages = [{"role": "system", "content": dynamic_sys_prompt}] + session_memory.get_active_context()
-
-                    yield {"type": "status", "content": f"Thinking (Step {current_iteration}/{MAX_TOOL_ITERATIONS})..."}
-
-                    # 调用 OpenAI Stream
+                    # 动态更新工具
+                    current_tools = self.toolbox.get_tool_definitions()
+                    
+                    # Stream Call
                     try:
-                        # [动态工具列表]
-                        current_tools = self.toolbox.get_tool_definitions()
-                        
                         response = self.client.chat.completions.create(
                             model=self.current_model_config['model'],
                             messages=messages,
@@ -593,72 +567,54 @@ Reply with a JSON object (Do not output Markdown code blocks, just raw JSON):
                     # 记录 AI 消息到内存
                     if active_tool_calls:
                         session_memory.add_ai_tool_call(full_response_content, active_tool_calls)
+                        messages.append({"role": "assistant", "content": full_response_content, "tool_calls": [
+                            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                            for tc in active_tool_calls
+                        ]})
+                        
+                        for tc in active_tool_calls:
+                            if stop_event.is_set(): return
+                            func_name = tc.function.name
+                            try:
+                                args = json.loads(tc.function.arguments)
+                            except:
+                                args = {}
+                            
+                            yield {"type": "status", "content": f"Executing: {func_name}..."}
+                            tool_result_raw = self._route_tool_execution(func_name, args, stop_event)
+                            
+                            # 增加 Prompt 指引
+                            tool_result = f"{tool_result_raw}\n\n[System: Check your plan. Update <plan> status in next response.]"
+                            
+                            yield {"type": "tool", "name": func_name, "content": tool_result_raw}
+                            session_memory.add_tool_message(tool_result, tc.id)
+                            
+                            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
                     else:
+                        # 没有工具调用，说明 AI 认为该回合结束
                         session_memory.add_ai_message(full_response_content)
-                        # 如果没有工具调用，说明 AI 输出了最终回复，结束当前 turn
-                        # 但如果是自动继续的中间状态，这里 break 只会结束内层循环，外层循环需要判断
-                        # 这是一个正常的对话结束点，我们退出整个 chat 函数
-                        self._update_summary_if_needed(session_memory)
-                        # 启动异步线程进行记忆萃取
-                        threading.Thread(target=self._extract_and_save_memory_async, args=(turn_log_for_extraction, session_id), daemon=True).start()
-                        return 
+                        is_generation_finished = True
+                        break # 跳出 Action Loop
 
-                    # 执行工具
-                    for tc in active_tool_calls:
-                        if stop_event.is_set():
-                            yield {"type": "status", "content": "⛔ Interrupted before tool execution."}
-                            return
-
-                        func_name = tc.function.name 
-                        try:
-                            args = json.loads(tc.function.arguments)
-                        except:
-                            args = {}
+                # 3. 督战检查 (Supervisor Check)
+                # 只有当 AI 认为自己完成了（跳出了 Action Loop），且还没达到 Supervisor 限制时检查
+                if is_generation_finished and supervisor_loops < MAX_SUPERVISOR_LOOPS:
+                    decision = self._supervisor_check(session_memory, user_input)
+                    
+                    if decision.get("status") == "INCOMPLETE":
+                        supervisor_loops += 1
+                        instruction = decision.get("instruction", "Task incomplete.")
+                        msg = f"[👮 SUPERVISOR INTERVENTION]: Task not finished. {instruction} Continue executing the plan immediately."
                         
-                        yield {"type": "status", "content": f"Executing: {func_name} ({current_iteration}/{MAX_TOOL_ITERATIONS})"}
+                        yield {"type": "status", "content": f"👮 Supervisor: {instruction} (Auto-Continuing)"}
                         
-                        # 执行工具
-                        tool_result_raw = self._route_tool_execution(func_name, args, stop_event)
-                        
-                        # [关键修改] 在工具结果中追加当前次数限制信息，供模型参考
-                        tool_result = f"{str(tool_result_raw)}\n\n[System Info: Tool Use Count: {current_iteration}/{MAX_TOOL_ITERATIONS}]"
-                        
-                        yield {"type": "tool", "name": func_name, "content": tool_result_raw} # UI 显示原始结果，不带 System Info
-                        
-                        turn_log_for_extraction += f"Tool Output ({func_name}): {str(tool_result)[:1000]}\n"
-                        
-                        session_memory.add_tool_message(tool_result, tc.id)
-
-                # --- 内层循环结束 (达到 MAX_TOOL_ITERATIONS) ---
-                
-                # 检查是否允许继续
-                if continuation_count >= MAX_CONTINUATIONS:
-                    yield {"type": "status", "content": "⚠️ Maximum auto-continuations reached. Stopping to prevent infinite loops."}
-                    session_memory.add_system_message("System: Max continuation limit reached. Please provide a final summary.")
-                    # 此时不 return，而是让模型最后一次机会做总结
-                    break 
-
-                # [核心逻辑] 智能反思：是否需要继续？
-                yield {"type": "status", "content": "⏳ Limit reached. Reflecting on progress..."}
-                decision = self._autonomous_reflection(user_input, session_memory)
-                
-                if decision.get("status") == "CONTINUE":
-                    continuation_count += 1
-                    # [Anthropic 最佳实践] 注入锚点，防止模型遗忘最初任务
-                    anchor_message = f"""
-[System]: Tool execution limit reached for this batch. Counter reset (0/{MAX_TOOL_ITERATIONS}).
-Auto-Continue initiated ({continuation_count}/{MAX_CONTINUATIONS}).
-
-CRITICAL REMINDER - Your Original Objective:
-"{user_input}"
-
-Reasoning for continuation: {decision.get('reasoning', 'Task incomplete')}
-Proceed with the next step immediately.
-"""
-                    session_memory.add_system_message(anchor_message)
-                    yield {"type": "status", "content": f"🔄 Auto-Continuing: {decision.get('reasoning')}"}
-                    # 重新开始内层循环
-                    continue 
+                        # 注入系统指令，强制继续
+                        session_memory.add_system_message(msg)
+                        # 这里不需要更新 messages，因为外层 while 会重新构建 Prompt (包含新注入的 system msg)
+                        continue # 重新进入 ReAct 循环
+                    else:
+                        # 任务完成
+                        break 
                 else:
                     # 模型认为任务结束或不需要继续
                     yield {"type": "status", "content": "✅ Task reflection complete. Finishing."}

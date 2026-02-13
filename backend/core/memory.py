@@ -13,8 +13,8 @@ class ConversationMemory:
     1. 完整日志记录 (Full Log)：保存到磁盘，不做删减。
     2. 滑动窗口 (Sliding Window)：用于 LLM 上下文，只返回最近 N 轮。
     3. 摘要 (Summary)：存储历史对话的总结。
-    4. [新增] 上下文自愈：防止因工具调用中断导致的 API 格式错误。
-    5. [新增] 多会话管理能力：支持重命名、删除特定消息。
+    4. 上下文自愈：防止因工具调用中断导致的 API 格式错误。
+    5. [修改] 锚定上下文 (Pinned Context)：始终保留对话开头的意图和计划。
     """
     def __init__(self, session_id="default", base_dir="logs/sessions", window_size=10):
         self.session_id = session_id
@@ -195,49 +195,68 @@ class ConversationMemory:
 
     def get_active_context(self) -> List[Dict]:
         """
-        获取上下文并进行滑动窗口处理。
+        [修改] 获取组合上下文：
+        1. Pinned Context: 前2条消息（通常是用户首条指令 + AI初步计划）。
+        2. Sliding Window: 最近 N 条消息。
+        这样即使对话很长，AI 也不会忘记最初的目标。
         """
         full_history = self._read_full_log()
         
         if not full_history:
             return []
 
-        # 1. 简单的切片 (取最近 window_size 条)
-        # 注意：为了防止把 Tool Call 和 Tool Result 切开，我们不仅看数量，还要向后回溯
-        window_msgs = full_history[-self.window_size:]
+        # 清洗掉 system 消息（system 消息通常用于内部状态，Prompt 中会重新构建）
+        # 但如果是 Supervisor 注入的 System 指令，我们希望保留在最近的窗口里
+        # 这里暂时保留所有，由 HostAgent 的 Prompt 构建逻辑决定是否包含摘要
         
-        # 回溯补全：如果切片的第一条是 'tool' (Result)，说明它的 'assistant' (Call) 被切掉了，需要补回来
-        while len(full_history) > len(window_msgs):
-            first_msg = window_msgs[0]
-            if first_msg.get('role') == 'tool':
-                # 工具结果，必须包含前面的工具调用
-                extra_idx = len(full_history) - len(window_msgs) - 1
-                if extra_idx >= 0:
-                    window_msgs.insert(0, full_history[extra_idx])
-                else:
-                    break
-            else:
-                break
+        conversation_msgs = [m for m in full_history if m.get('role') != 'system' or 'Supervisor' in m.get('content', '')]
 
-        # 3. 执行自愈清洗
-        sanitized = self._sanitize_context(window_msgs)
+        context_msgs = []
+        
+        # 1. [Pinned Context] 获取前 2 条 (User + AI Plan)
+        # 只有当总长度远大于窗口时才通过 Pinned 机制保护头部
+        if len(conversation_msgs) > self.window_size + 2:
+            pinned = conversation_msgs[:2]
+            context_msgs.extend(pinned)
+            
+            # 2. [Sliding Window] 获取最近的 window_size
+            recent = conversation_msgs[-self.window_size:]
+            
+            # 避免重叠
+            for msg in recent:
+                if msg not in context_msgs: # 简单的引用比较
+                    context_msgs.append(msg)
+        else:
+            # 消息很少，直接全部返回
+            context_msgs = conversation_msgs
 
-        # 3. 格式清洗 (去除 timestamp 等 OpenAI 不接受的字段)
+        # 3. 回溯补全 (防止切断 Tool Chain)
+        # 注意：因为我们上面已经取了完整切片，这里的回溯主要针对 Sliding Window 边界
+        # 简单的做法：_sanitize_context 会处理孤儿 tool 消息，所以这里不做复杂回溯
+        
+        # 执行清洗
+        sanitized = self._sanitize_context(context_msgs)
+
+        # 字段过滤
         clean_history = []
         allowed_keys = ["role", "content", "tool_calls", "tool_call_id", "name"]
         for msg in sanitized:
             clean_msg = {k: v for k, v in msg.items() if k in allowed_keys}
             clean_history.append(clean_msg)
+            
         return clean_history
 
     def get_messages_for_summarization(self) -> str:
         """获取需要被摘要的旧消息（即在窗口之外的消息）"""
         full_history = self._read_full_log()
-        if len(full_history) <= self.window_size:
+        # 保留前2条（Pinned）和后 window_size 条，中间的用于摘要
+        if len(full_history) <= self.window_size + 2:
             return ""
         
-        # 获取窗口之前的消息
-        msgs_to_summarize = full_history[:-self.window_size]
+        msgs_to_summarize = full_history[2:-self.window_size]
+        if not msgs_to_summarize:
+            return ""
+
         text_block = ""
         for msg in msgs_to_summarize:
             role = msg.get('role', 'unknown')

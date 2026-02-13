@@ -6,6 +6,8 @@ import json
 import asyncio
 import logging
 import threading
+import time
+import re
 import queue  # 标准库 queue
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
@@ -185,53 +187,130 @@ def run_sync_chat_generator(agent_instance, user_input, session_id, async_queue,
 
 # --- [核心修改] 哨兵自动响应逻辑 ---
 
+async def generate_session_name(agent, trigger_message: str) -> str:
+    """
+    [新增] 使用AI为新会话生成一个15字以内的名称
+    """
+    try:
+        # 构造一个简洁的命名提示
+        naming_prompt = f"""Based on the following sentinel trigger message, generate a short session name (max 15 Chinese characters) that describes this task.
+
+Trigger Message: {trigger_message}
+
+Requirements:
+1. Maximum 15 characters
+2. Must be in Chinese (or English if more appropriate)
+3. Should be descriptive of the task
+4. Output ONLY the name, nothing else
+
+Example outputs:
+- "文件监控警报处理"
+- "定时任务检查"
+- "系统性能监控"
+
+Output:"""
+
+        # 调用LLM生成名称
+        response = agent.client.chat.completions.create(
+            model=agent.current_model_config['model'],
+            messages=[{"role": "user", "content": naming_prompt}],
+            temperature=0.3,
+            max_tokens=50
+        )
+
+        name = response.choices[0].message.content.strip()
+        # 清理名称，移除可能的引号和特殊字符
+        name = re.sub(r'["\'\[\]]', '', name)
+        # 限制长度
+        if len(name) > 15:
+            name = name[:15]
+
+        logger.info(f"[Sentinel] Generated session name: {name}")
+        return name if name else "哨兵任务"
+
+    except Exception as e:
+        logger.error(f"[Sentinel] Failed to generate session name: {e}")
+        return "哨兵任务"
+
+
 async def run_autonomous_reaction(trigger_message: str):
     """
-    [新增] 自主反应任务：
-    当哨兵触发时，不仅通知前端，还启动 AI 进行分析和工具执行。
+    [修复Bug 3] 自主反应任务：
+    当哨兵触发时，创建独立会话，AI自动命名，并启动分析和工具执行。
     结果会实时流式传输到 WebSocket，最后通过 Toast 弹窗通知。
     """
-    session_id = "resonance_main"
-    logger.info(f"[Auto-Reaction] AI triggered by sentinel: {trigger_message}")
+    # [修复Bug 3] 为哨兵触发创建独立的会话
+    new_session_id = f"sentinel_{int(time.time())}"
+    logger.info(f"[Auto-Reaction] Creating new session for sentinel: {new_session_id}")
 
-    # 1. 等待 WebSocket 连接稳定（防止触发瞬间连接还没握手完成）
+    # 1. 先创建会话
+    try:
+        state.agent.get_memory(new_session_id)
+        logger.info(f"[Auto-Reaction] New session created: {new_session_id}")
+    except Exception as e:
+        logger.error(f"[Auto-Reaction] Failed to create session: {e}")
+        new_session_id = "resonance_main"  # fallback
+
+    # 2. 等待 WebSocket 连接稳定
     await asyncio.sleep(0.5)
 
-    # 2. 发送初始状态通知
+    # 3. 发送初始状态通知（通知前端创建新会话并跳转）
     await manager.broadcast({
-        "type": "sentinel_alert", # 前端会触发 Toast
-        "content": f"Sentinel triggered. AI is responding to: {trigger_message}",
-        "session_id": session_id
+        "type": "sentinel_alert",  # 前端会触发 Toast
+        "content": f"Sentinel triggered. Creating new session for: {trigger_message}",
+        "session_id": new_session_id,
+        "action": "create_session",  # 告诉前端创建新会话
+        "trigger_message": trigger_message
     })
 
-    # 3. 构造 Prompt 注入
+    # 4. 构造 Prompt 注入
     prompt = f"[System Alert]: {trigger_message}. Please check this and take necessary actions."
-    
+
     full_response_text = ""
     event_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
-    
-    # [修改点] 使用线程池提交任务，而不是手动创建 Thread
+
+    # 5. 使用线程池提交任务
     state.executor.submit(
-        run_sync_chat_generator, 
-        state.agent, 
-        prompt, 
-        session_id, 
-        event_queue, 
+        run_sync_chat_generator,
+        state.agent,
+        prompt,
+        new_session_id,
+        event_queue,
         loop
     )
 
-    # 4. 消费队列并广播
+    # 6. 消费队列并广播
     while True:
         event = await event_queue.get()
-        event["session_id"] = session_id
-        
+        event["session_id"] = new_session_id
+
         # 实时推送
         await manager.broadcast(event)
-        
+
         if event["type"] == "delta":
             full_response_text += (event.get("content") or "")
         elif event["type"] == "done":
+            # [修复Bug 3] 完成后，使用AI为会话命名
+            try:
+                session_name = await generate_session_name(state.agent, trigger_message)
+                # 重命名会话
+                mem = state.agent.get_memory(new_session_id)
+                mem.rename_session(session_name)
+                # 更新内存缓存中的键
+                if new_session_id in state.agent.memory_cache:
+                    state.agent.memory_cache[session_name] = state.agent.memory_cache.pop(new_session_id)
+
+                logger.info(f"[Auto-Reaction] Session renamed to: {session_name}")
+
+                # 通知前端会话已重命名
+                await manager.broadcast({
+                    "type": "session_renamed",
+                    "session_id": new_session_id,
+                    "new_name": session_name
+                })
+            except Exception as e:
+                logger.error(f"[Auto-Reaction] Failed to rename session: {e}")
             break
         elif event["type"] == "error":
             logger.error(f"Auto-reaction AI error: {event['content']}")
@@ -375,16 +454,33 @@ async def list_skills():
 @app.post("/api/skills/learn")
 async def learn_skill_endpoint(payload: SkillLearnRequest):
     """
-    触发 AI 学习新技能。这是一个可能耗时的操作，为了不阻塞主线程，放到 executor 中运行。
+    [修复Bug 4] 触发 AI 学习新技能。
+    这是一个可能耗时的操作，为了不阻塞主线程，放到 executor 中运行。
+    现在会正确检查返回值并返回适当的HTTP状态码。
     """
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            state.executor, 
-            state.agent.skill_manager.learn_skill, 
+        result_tuple = await loop.run_in_executor(
+            state.executor,
+            state.agent.skill_manager.learn_skill,
             payload.url_or_path
         )
-        return {"status": "success", "result": result}
+
+        # [修复Bug 4] 处理新的返回格式 (success: bool, message: str)
+        if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+            success, message = result_tuple
+            if success:
+                return {"status": "success", "message": message}
+            else:
+                # 返回400错误并附带详细错误信息
+                raise HTTPException(status_code=400, detail=message)
+        else:
+            # 兼容旧的返回格式
+            return {"status": "success", "result": result_tuple}
+
+    except HTTPException:
+        # 重新抛出HTTP异常，让FastAPI正确处理
+        raise
     except Exception as e:
         logger.error(f"Skill learning failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -593,37 +689,8 @@ async def get_disk_status():
     return SystemMonitor.get_disk_usage()
 
 # --- SKILL MANAGEMENT APIs ---
-
-@app.get("/api/skills/list")
-async def list_skills():
-    """获取所有技能（包括内置 Scripts 和 导入的 Skills）"""
-    # Legacy scripts
-    legacy = state.agent.config.get('scripts', {})
-    
-    # Imported skills from config
-    imported = state.agent.config.get('imported_skills', {})
-    
-    return {
-        "legacy": legacy,
-        "imported": imported
-    }
-
-@app.post("/api/skills/learn")
-async def learn_skill_endpoint(payload: SkillLearnRequest):
-    """
-    触发 AI 学习新技能。这是一个可能耗时的操作，为了不阻塞主线程，放到 executor 中运行。
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            state.executor, 
-            state.agent.skill_manager.learn_skill, 
-            payload.url_or_path
-        )
-        return {"status": "success", "result": result}
-    except Exception as e:
-        logger.error(f"Skill learning failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# [注意] 第一个 /api/skills/list 和 /api/skills/learn 定义在第428行和454行
+# 用于获取真实的skill注册表
 
 @app.delete("/api/skills/{skill_name}")
 async def delete_skill(skill_name: str):
@@ -687,20 +754,26 @@ async def websocket_chat(websocket: WebSocket):
 
 
                 # 3. 处理命令
-                if user_input == "/stop":
-                    logger.info(f"Received STOP command for session: {session_id}")
+                # [修复Bug 1] 检查是否是打断操作（用户发送新消息时中断之前的处理）
+                is_interrupt = payload.get("interrupt", False)
+
+                if user_input == "/stop" or is_interrupt:
+                    logger.info(f"Received STOP/INTERRUPT command for session: {session_id}")
                     # 立即触发后端中断
                     state.agent.interrupt(session_id=session_id)
-                    
+
                     # 立即反馈给前端（绕过队列，确保响应速度）
                     await websocket.send_json({
-                        "type": "status", 
-                        "content": "🛑 Aborted by User.",
+                        "type": "status",
+                        "content": "🛑 Previous task interrupted by new user message.",
                         "session_id": session_id
                     })
                     # 同时也放入队列标记结束，确保 frontend 状态重置
                     await event_queue.put({"type": "done", "session_id": session_id})
-                    continue
+
+                    # 如果是普通消息打断，继续处理新消息而不是退出
+                    if is_interrupt:
+                        logger.info(f"Processing new message after interrupt: {user_input[:50]}...")
 
                 # 正常消息 echo
                 await websocket.send_json({"type": "user", "content": user_input, "session_id": session_id,"id": msg_id})

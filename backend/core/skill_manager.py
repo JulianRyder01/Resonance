@@ -298,50 +298,73 @@ if __name__ == "__main__":
             return f"Error: No executable 'wrapper.py' found for skill {skill_name}."
 
     # --- 以下为保留的辅助功能 (learn/delete) ---
-    
-    def learn_skill(self, url_or_path: str) -> str:
+
+    # [修复Bug 4] 修改返回类型为元组 (success: bool, message: str)
+    def learn_skill(self, url_or_path: str) -> tuple:
         """
-        [New Implementation] 动态学习技能
+        [修复Bug 4] 动态学习技能
         支持 GitHub URL 或 本地绝对路径。
+        返回: (success: bool, message: str)
         """
         try:
             skill_name = os.path.basename(url_or_path.rstrip("/\\")).replace(".git", "")
             target_dir = os.path.join(self.skills_root, skill_name)
-            
+
             if os.path.exists(target_dir):
-                return f"Error: Skill '{skill_name}' already exists."
+                return (False, f"Error: Skill '{skill_name}' already exists.")
 
             # 1. Fetch Source
             if url_or_path.startswith("http"):
                 # Git Clone
                 logger.info(f"Cloning {url_or_path}...")
-                subprocess.run(["git", "clone", url_or_path, target_dir], check=True)
+                subprocess.run(["git", "clone", url_or_path, target_dir], check=True, capture_output=True)
             elif os.path.exists(url_or_path):
                 # Local Copy
                 logger.info(f"Copying from {url_or_path}...")
                 shutil.copytree(url_or_path, target_dir)
             else:
-                return "Error: Invalid URL or Path."
+                return (False, "Error: Invalid URL or Path. Please check if the path exists or the URL is correct.")
 
-            # 2. Validate Structure
+            # 2. Validate Structure - 检查SKILL.md是否存在
             if not os.path.exists(os.path.join(target_dir, "SKILL.md")):
-                shutil.rmtree(target_dir) # Rollback
-                return "Error: Invalid Skill format. 'SKILL.md' is missing."
+                # 回滚：删除创建的文件
+                if os.path.exists(target_dir):
+                    shutil.rmtree(target_dir)
+                return (False, "Error: Invalid Skill format. 'SKILL.md' is missing in the skill folder.")
 
             # 3. Install Dependencies (Optional)
             req_path = os.path.join(target_dir, "requirements.txt")
             if os.path.exists(req_path):
-                logger.info("Installing dependencies...")
-                subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], check=True)
+                try:
+                    logger.info("Installing dependencies...")
+                    subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path],
+                                   check=True, capture_output=True, timeout=300)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Dependency installation timed out, but continuing...")
+                except Exception as e:
+                    logger.warning(f"Failed to install dependencies: {e}")
 
-            # 4. Refresh Registry
+            # 4. Refresh Registry - 重新扫描SKILLS目录
             self.scan_skills()
-            return f"Success: Skill '{skill_name}' learned and registered."
+
+            # 验证skill是否被正确添加
+            if skill_name in self.skill_registry:
+                logger.info(f"Skill '{skill_name}' successfully learned and registered.")
+                return (True, f"Success: Skill '{skill_name}' learned and registered.")
+            else:
+                logger.warning(f"Skill '{skill_name}' added but not found in registry after scan.")
+                return (False, f"Warning: Skill folder created but failed to load. Please check the skill format.")
 
         except subprocess.CalledProcessError as e:
-            return f"Error during git/pip operation: {e}"
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            logger.error(f"Git/pip operation failed: {error_msg}")
+            return (False, f"Error during git/pip operation: {error_msg}")
+        except shutil.Error as e:
+            logger.error(f"File copy error: {e}")
+            return (False, f"Error copying files: {str(e)}")
         except Exception as e:
-            return f"Error learning skill: {str(e)}"
+            logger.error(f"Learn skill error: {e}")
+            return (False, f"Error learning skill: {str(e)}")
 
     def delete_skill(self, skill_name: str) -> bool:
         if skill_name in self.skill_registry:

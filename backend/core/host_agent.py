@@ -78,6 +78,9 @@ class HostAgent:
         self.active_session_id = default_session
         self.memory_cache = {}
 
+        # [修复Bug 3] 启动定期清理线程
+        self._start_maintenance_thread()
+
 
     def get_memory(self, session_id=None) -> ConversationMemory:
         """[新增] 获取指定会话的内存对象，如果不存在则创建并缓存"""
@@ -330,6 +333,63 @@ Or, if user continue to chat with you, the limit will be reset too.
                 print(f"[Warning] Failed to generate summary: {e}")
 
     # =========================================================================
+    # [修复Bug 3] 定期清理 Resonance Main 会话
+    # =========================================================================
+    def _start_maintenance_thread(self):
+        """启动定期维护线程，用于清理 Resonance Main 会话"""
+        def maintenance_loop():
+            """定期检查并清理 Resonance Main 会话"""
+            # 每5分钟检查一次
+            CHECK_INTERVAL = 300  # 5 minutes
+
+            while not self.stop_flag:
+                time.sleep(CHECK_INTERVAL)
+                try:
+                    self._cleanup_resonance_main()
+                except Exception as e:
+                    print(f"[Maintenance] Error during cleanup: {e}")
+
+        # 启动守护线程
+        maintenance_thread = threading.Thread(target=maintenance_loop, daemon=True)
+        maintenance_thread.start()
+        print("[System] Maintenance thread started for Resonance Main cleanup")
+
+    def _cleanup_resonance_main(self):
+        """
+        清理 Resonance Main 会话：
+        将会话中开启的新任务剥离为独立chat
+        """
+        try:
+            main_mem = self.get_memory("resonance_main")
+            history = main_mem._read_full_log()
+
+            if not history:
+                return
+
+            # 查找包含 [Sentinel Alert 或 System Alert] 的消息
+            # 这些是将任务剥离为独立会话的标记点
+            sentinel_indices = []
+            for i, msg in enumerate(history):
+                content = msg.get('content', '')
+                if '[Sentinel Alert' in content or '[System Alert' in content:
+                    sentinel_indices.append(i)
+
+            if sentinel_indices:
+                print(f"[Maintenance] Found {len(sentinel_indices)} sentinel/system alerts in resonance_main")
+
+                # 保留开头的系统设置，只保留最新的几轮对话
+                # 保留最近5条消息作为上下文
+                keep_count = 10
+                if len(history) > keep_count:
+                    # 保留前2条系统消息 + 最近8条对话
+                    kept_history = history[:2] + history[-keep_count:]
+                    main_mem._write_full_log(kept_history)
+                    print(f"[Maintenance] Cleaned resonance_main: {len(history)} -> {len(kept_history)} messages")
+
+        except Exception as e:
+            print(f"[Maintenance] Failed to cleanup resonance_main: {e}")
+
+    # =========================================================================
     # [新增核心逻辑] 异步记忆萃取与存储
     # =========================================================================
     def _extract_and_save_memory_async(self, turn_events_log, session_id):
@@ -520,23 +580,68 @@ Response (JSON Only):
                         return
 
                     current_iteration += 1
-                    
+
                     # 动态更新工具
                     current_tools = self.toolbox.get_tool_definitions()
-                    
-                    # Stream Call
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=self.current_model_config['model'],
-                            messages=messages,
-                            tools=current_tools,
-                            tool_choice="auto",
-                            temperature=self.current_model_config['temperature'],
-                            stream=True
-                        )
-                    except Exception as e:
-                        yield {"type": "error", "content": f"LLM API Error: {str(e)}"}
-                        return # 发生API错误，停止
+
+                    # [修复Bug 2] Stream Call with Exponential Backoff Retry
+                    # 实现指数退避重试机制（最多3-5次）
+                    MAX_RETRIES = 3
+                    retry_count = 0
+                    response = None
+                    last_error = None
+
+                    while retry_count <= MAX_RETRIES:
+                        try:
+                            response = self.client.chat.completions.create(
+                                model=self.current_model_config['model'],
+                                messages=messages,
+                                tools=current_tools,
+                                tool_choice="auto",
+                                temperature=self.current_model_config['temperature'],
+                                stream=True
+                            )
+                            # 成功获取response，跳出重试循环
+                            break
+                        except Exception as e:
+                            last_error = e
+                            retry_count += 1
+
+                            # 计算退避时间：2^retry_count 秒
+                            import math
+                            backoff_time = math.pow(2, retry_count)
+
+                            # 输出详细的错误日志
+                            error_type = type(e).__name__
+                            error_msg = str(e)
+                            logger.error(
+                                f"[API Call Failed] Attempt {retry_count}/{MAX_RETRIES} | "
+                                f"Error Type: {error_type} | "
+                                f"Error Message: {error_msg} | "
+                                f"Backoff Time: {backoff_time:.1f}s | "
+                                f"Model: {self.current_model_config['model']}"
+                            )
+
+                            if retry_count <= MAX_RETRIES:
+                                # 通知前端正在重试
+                                yield {"type": "status", "content": f"⚠️ API call failed, retrying in {backoff_time:.1f}s ({retry_count}/{MAX_RETRIES})..."}
+                                import time
+                                time.sleep(backoff_time)
+                            else:
+                                # 所有重试都失败
+                                logger.error(
+                                    f"[API Call Failed] All {MAX_RETRIES} retries exhausted | "
+                                    f"Final Error: {error_msg} | "
+                                    f"Session ID: {session_id}"
+                                )
+                                # 尝试提供部分结果（如果有的话）
+                                if full_response_content:
+                                    yield {"type": "status", "content": f"⚠️ API failed after retries, but we have partial response to show."}
+                                    yield {"type": "error", "content": f"LLM API Error (after {MAX_RETRIES} retries): {error_msg}. Partial result available."}
+                                    return
+                                else:
+                                    yield {"type": "error", "content": f"LLM API Error (after {MAX_RETRIES} retries): {error_msg}. Please check API key, network, or model availability."}
+                                    return
 
                     full_response_content = ""
                     tool_calls_buffer = {} # 用于收集流式的 tool_calls
@@ -546,15 +651,33 @@ Response (JSON Only):
                             if stop_event.is_set():
                                 response.close()
                                 yield {"type": "status", "content": "\n[Stopped]"}
-                                return 
+                                return
+
+                            # [修复Bug 5] 检查 chunk.choices 是否存在且不为空
+                            # 有些API响应可能没有choices，或者流结束信号没有choices
+                            if not hasattr(chunk, 'choices') or not chunk.choices:
+                                # 检查是否是流结束标志
+                                if hasattr(chunk, 'usage') or hasattr(chunk, 'model_dump'):
+                                    # 这通常是最后的元数据块，记录日志并继续
+                                    logger.debug(f"Stream metadata chunk received: {chunk}")
+                                    continue
+                                else:
+                                    # 未知情况，记录警告但继续
+                                    logger.warning(f"Unexpected chunk format in stream: {chunk}")
+                                    continue
+
+                            # 确保 choices[0] 存在
+                            if len(chunk.choices) == 0:
+                                logger.warning("Empty choices in streaming response chunk")
+                                continue
 
                             delta = chunk.choices[0].delta
-                            
+
                             if hasattr(delta, 'content') and delta.content is not None:
                                 content_chunk = delta.content
                                 full_response_content += content_chunk
                                 yield {"type": "delta", "content": content_chunk}
-                            
+
                             if delta.tool_calls:
                                 for tc_chunk in delta.tool_calls:
                                     idx = tc_chunk.index
@@ -567,8 +690,19 @@ Response (JSON Only):
                                     if tc_chunk.function.arguments:
                                         tool_calls_buffer[idx]["arguments"] += tc_chunk.function.arguments
                     except Exception as e:
-                        yield {"type": "error", "content": f"Stream context error: {str(e)}"}
-                        return
+                        # [修复Bug 5] 改进错误处理，区分不同类型的错误
+                        error_type = type(e).__name__
+                        error_msg = str(e)
+                        logger.error(f"Stream context error ({error_type}): {error_msg}")
+
+                        # 如果已经有部分内容，尝试返回部分结果
+                        if full_response_content:
+                            yield {"type": "status", "content": "Stream interrupted but partial response available."}
+                            yield {"type": "delta", "content": "\n[Stream error - partial response above]"}
+                            return
+                        else:
+                            yield {"type": "error", "content": f"Stream context error: {error_msg}"}
+                            return
                     
                     if full_response_content:
                         turn_log_for_extraction += f"AI Thought: {full_response_content}\n"

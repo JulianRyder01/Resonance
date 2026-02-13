@@ -9,6 +9,9 @@ import keyboard
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# [修复Bug 3] 导入必要的模块用于AI命名
+import re
+
 class SentinelEventHandler(FileSystemEventHandler):
     """文件监控事件处理器"""
     def __init__(self, callback, description):

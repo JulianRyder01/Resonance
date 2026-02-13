@@ -291,21 +291,26 @@ export default function ChatInterface({ ws, isConnected }) {
   if (!input.trim() || !isConnected) return;
     const tempId = Date.now().toString();
     const msg = input.trim();
-    
-    // [修复点] 之前这里的 messageText 变量未定义，导致报错 ReferenceError
-    // 这是“需求 ①”报错的主因
+
+    // [修复Bug 1] 用户发送消息时，明确标记为打断操作
+    // 这样可以确保之前的渲染流程被重置，新的输入能正确触发新的渲染流程
     try {
     if (msg !== "/stop") {
-        setMessages(prev => [...prev, { role: 'user', content: msg, id: tempId }]);
+        // 在发送消息时设置打断标记，并重置渲染状态
+        setMessages(prev => [...prev, { role: 'user', content: msg, id: tempId, isInterrupted: true }]);
+        // 立即设置isTyping为true，重置渲染状态
+        setIsTyping(true);
         // 发送消息时重置滚动锁定
         isUserScrollingRef.current = false;
         setTimeout(scrollToBottom, 50);
-  }
+    }
 
-    ws.send(JSON.stringify({ 
+    ws.send(JSON.stringify({
       message: msg, // 已修正：从 messageText 改为 msg
       session_id: activeSessionId,
-      id: tempId // 发送 ID 给后端
+      id: tempId, // 发送 ID 给后端
+      // [新增] 标记此消息为打断操作，用于后端中断之前的处理流程
+      interrupt: true
     }));
     setInput("");
   } catch (err) {
